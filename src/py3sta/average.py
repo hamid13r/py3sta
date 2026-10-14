@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .io.mrc import read_mrc
+from .io.mrc import read_header, read_mrc
 from .io.particles import ParticleSet, tomo_name_from
 
 
@@ -27,29 +27,41 @@ def box_grid(box: int) -> np.ndarray:
 
 
 def _trilinear(vol, pts):
-    """Sample vol[z,y,x] at pts (N,3) xyz. Returns (values, inside-mask)."""
-    shape = np.array(vol.shape[::-1])  # xyz sizes
-    p0 = np.floor(pts).astype(np.int64)
-    f = (pts - p0).astype(np.float32)
-    inside = np.all((p0 >= 0) & (p0 + 1 < shape), axis=1)
-    p0c = np.clip(p0, 0, shape - 2)
-    x0, y0, z0 = p0c.T
-    fx, fy, fz = f.T
-    out = np.zeros(len(pts), np.float32)
-    for dz in (0, 1):
-        wz = fz if dz else 1 - fz
-        for dy in (0, 1):
-            wy = fy if dy else 1 - fy
-            for dx in (0, 1):
-                wx = fx if dx else 1 - fx
-                out += wz * wy * wx * vol[z0 + dz, y0 + dy, x0 + dx]
-    return np.where(inside, out, 0.0).astype(np.float32), inside
+    """Sample vol[z,y,x] at pts (N,3) xyz. Returns (values, inside-mask).
+
+    Gathers from the flattened array with ``take`` (about 4x faster than 3-D fancy indexing).
+    """
+    nz, ny, nx = vol.shape
+    flat = np.ascontiguousarray(vol, dtype=np.float32).ravel()
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    x0, y0, z0 = np.floor(x), np.floor(y), np.floor(z)
+    fx, fy, fz = (x - x0).astype(np.float32), (y - y0).astype(np.float32), (z - z0).astype(np.float32)
+    x0, y0, z0 = x0.astype(np.int64), y0.astype(np.int64), z0.astype(np.int64)
+    inside = (x0 >= 0) & (y0 >= 0) & (z0 >= 0) & (x0 < nx - 1) & (y0 < ny - 1) & (z0 < nz - 1)
+    np.clip(x0, 0, nx - 2, out=x0)
+    np.clip(y0, 0, ny - 2, out=y0)
+    np.clip(z0, 0, nz - 2, out=z0)
+    i0 = (z0 * ny + y0) * nx + x0
+    sy, sz = nx, nx * ny
+    c00 = flat.take(i0);           c00 = c00 + fx * (flat.take(i0 + 1) - c00)
+    c01 = flat.take(i0 + sy);      c01 = c01 + fx * (flat.take(i0 + sy + 1) - c01)
+    c10 = flat.take(i0 + sz);      c10 = c10 + fx * (flat.take(i0 + sz + 1) - c10)
+    c11 = flat.take(i0 + sz + sy); c11 = c11 + fx * (flat.take(i0 + sz + sy + 1) - c11)
+    c0 = c00 + fy * (c01 - c00)
+    c1 = c10 + fy * (c11 - c10)
+    out = c0 + fz * (c1 - c0)
+    out[~inside] = 0
+    return out, inside
 
 
 def extract(tomo, centre_xyz, matrix, box: int, grid=None):
     """Return (subvolume[z,y,x], weight[z,y,x]) in the reference frame."""
     grid = box_grid(box) if grid is None else grid
-    pts = grid.reshape(-1, 3) @ np.asarray(matrix, np.float32) + np.asarray(centre_xyz, np.float32)
+    g = grid.reshape(-1, 3)
+    m = np.asarray(matrix, np.float32)
+    # pts = g @ M + c, written element-wise: a BLAS matmul here spawns threads in every
+    # worker process and oversubscribes the CPU (made -j 4 slower than -j 1).
+    pts = (g[:, :1] * m[0] + g[:, 1:2] * m[1] + g[:, 2:3] * m[2] + np.asarray(centre_xyz, np.float32))
     shape = np.array(tomo.shape[::-1])
     lo = np.clip(np.floor(pts.min(0)).astype(int), 0, shape - 1)
     hi = np.clip(np.ceil(pts.max(0)).astype(int) + 2, 1, shape)
@@ -70,112 +82,127 @@ class AverageResult:
     apix: float
 
 
+def half_sets(ps: ParticleSet) -> np.ndarray:
+    """Half-set (1/2) per particle: rlnRandomSubset if present, else alternating by row."""
+    alt = np.arange(len(ps)) % 2 + 1
+    if "rlnRandomSubset" in ps.df:
+        s = ps.df["rlnRandomSubset"].to_numpy()
+        return np.where(np.isin(s, (1, 2)), s, alt).astype(int)
+    return alt
+
+
+def _accumulate(tomo_path, centres, mats, halves, box, normalize, min_inside, tilt, dose_weight):
+    """Worker: partial sums for one chunk of particles from one tomogram (runs in a subprocess)."""
+    vol, apix = read_mrc(tomo_path)
+    grid = box_grid(box)
+    if tilt is not None:
+        from .wedge import rfft_grid, wedge_weights
+
+        kgrid = rfft_grid(box)
+        shp, ctype = (box, box, box // 2 + 1), np.complex128
+    else:
+        shp, ctype = (box,) * 3, np.float64
+    S = {h: np.zeros(shp, ctype) for h in (1, 2)}
+    W = {h: np.zeros(shp, np.float64) for h in (1, 2)}
+    n = {1: 0, 2: 0}
+    skipped = 0
+    for c, M, h in zip(centres, mats, halves):
+        sub, w = extract(vol, c, M, box, grid)
+        if w.mean() < min_inside:
+            skipped += 1
+            continue
+        if normalize:
+            m = w > 0
+            s = sub[m].std()
+            sub = np.where(m, (sub - sub[m].mean()) / (s if s > 0 else 1), 0).astype(np.float32)
+        if tilt is not None:
+            wt = wedge_weights(box, tilt, M, apix, dose_weight, grid=kgrid)
+            S[h] += wt * np.fft.rfftn(sub)
+            W[h] += wt * wt
+        else:
+            S[h] += sub
+            W[h] += w
+        n[h] += 1
+    return S, W, n, skipped, len(centres), apix
+
+
 def average_particles(ps: ParticleSet, tomograms: dict, box: int, rotate: bool = True,
                       normalize: bool = True, min_inside: float = 0.9, progress=None,
                       tilts: dict | None = None, dose_weight: bool = False,
-                      wiener_eps: float = 0.05) -> AverageResult:
+                      wiener_eps: float = 0.05, jobs: int = 1, chunk: int | None = None) -> AverageResult:
     """Global average of all particles.
 
     tomograms: {rlnTomoName: path}. Particles whose box is < ``min_inside``
-    inside the tomogram are skipped. If rlnRandomSubset exists, half maps are
-    also returned.
+    inside the tomogram are skipped. Half maps follow rlnRandomSubset (else
+    alternate rows).
 
     tilts: {rlnTomoName: TiltInfo}. If given, the average is wedge-weighted in
     Fourier space:  F = sum(w_i F_i) / max(sum(w_i^2), wiener_eps * n),
     with w_i the particle's tilt coverage rotated into the reference frame.
+
+    jobs: number of worker processes (each reads its own chunk of particles
+    from the memmapped tomogram). Results agree across ``jobs`` to float rounding.
     """
-    if tilts is not None:
-        return _average_wedge(ps, tomograms, box, rotate, normalize, min_inside, progress,
-                              tilts, dose_weight, wiener_eps)
-    grid = box_grid(box)
-    shp = (box,) * 3
-    sums = {1: np.zeros(shp, np.float64), 2: np.zeros(shp, np.float64)}
-    wts = {1: np.zeros(shp, np.float64), 2: np.zeros(shp, np.float64)}
-    subset = ps.df["rlnRandomSubset"].to_numpy(int) if "rlnRandomSubset" in ps.df else None
-    mats = ps.matrices if rotate else np.broadcast_to(np.eye(3), (len(ps), 3, 3))
-    used = skipped = 0
-    apix_out = None
-    for tomo_name, idx in ps.df.groupby("rlnTomoName", sort=False).groups.items():
-        if tomo_name not in tomograms:
-            raise KeyError(f"no tomogram given for rlnTomoName={tomo_name!r}; have {list(tomograms)}")
-        vol, apix = read_mrc(tomograms[tomo_name])
-        apix_out = apix_out or apix
-        centres = ps.centers_px[np.asarray(idx)] * (ps.ts_apix / apix)
-        for k, i in enumerate(idx):
-            sub, w = extract(vol, centres[k], mats[i], box, grid)
-            if w.mean() < min_inside:
-                skipped += 1
-                continue
-            if normalize:
-                m = w > 0
-                s = sub[m].std()
-                sub = np.where(m, (sub - sub[m].mean()) / (s if s > 0 else 1), 0)
-            h = int(subset[i]) if subset is not None and subset[i] in (1, 2) else (1 if used % 2 == 0 else 2)
-            sums[h] += sub
-            wts[h] += w
-            used += 1
-            if progress:
-                progress(used + skipped, len(ps))
-    tot_w = wts[1] + wts[2]
-    avg = ((sums[1] + sums[2]) / np.maximum(tot_w, 1e-6)).astype(np.float32)
-    halves = tuple((sums[h] / np.maximum(wts[h], 1e-6)).astype(np.float32) for h in (1, 2))
-    return AverageResult(avg, halves, used, skipped, apix_out)
+    from concurrent.futures import ProcessPoolExecutor
 
-
-def _iter_particles(ps, tomograms, box, rotate, normalize, min_inside):
-    """Yield (row index, tomo name, subvolume, apix) for usable particles; None for skipped."""
-    grid = box_grid(box)
-    mats = ps.matrices if rotate else np.broadcast_to(np.eye(3), (len(ps), 3, 3))
-    for tomo_name, idx in ps.df.groupby("rlnTomoName", sort=False).groups.items():
-        if tomo_name not in tomograms:
-            raise KeyError(f"no tomogram given for rlnTomoName={tomo_name!r}; have {list(tomograms)}")
-        vol, apix = read_mrc(tomograms[tomo_name])
-        centres = ps.centers_px[np.asarray(idx)] * (ps.ts_apix / apix)
-        for k, i in enumerate(idx):
-            sub, w = extract(vol, centres[k], mats[i], box, grid)
-            if w.mean() < min_inside:
-                yield None
-                continue
-            if normalize:
-                m = w > 0
-                s = sub[m].std()
-                sub = np.where(m, (sub - sub[m].mean()) / (s if s > 0 else 1), 0).astype(np.float32)
-            yield i, tomo_name, sub, apix, mats[i]
-
-
-def _average_wedge(ps, tomograms, box, rotate, normalize, min_inside, progress, tilts, dose_weight, eps):
-    from .wedge import rfft_grid, wedge_weights
-
-    fshape = (box, box, box // 2 + 1)
-    sF = {h: np.zeros(fshape, np.complex128) for h in (1, 2)}
-    sW = {h: np.zeros(fshape, np.float64) for h in (1, 2)}
-    nh = {1: 0, 2: 0}
-    subset = ps.df["rlnRandomSubset"].to_numpy(int) if "rlnRandomSubset" in ps.df else None
-    kgrid = rfft_grid(box)
-    used = skipped = 0
-    apix_out = None
-    for item in _iter_particles(ps, tomograms, box, rotate, normalize, min_inside):
-        if item is None:
-            skipped += 1
-            continue
-        i, tomo, sub, apix, M = item
-        apix_out = apix_out or apix
-        if tomo not in tilts:
+    halves_all = half_sets(ps)
+    mats_all = ps.matrices if rotate else np.broadcast_to(np.eye(3), (len(ps), 3, 3))
+    jobs = max(1, int(jobs))
+    tasks = []
+    for tomo, idx in ps.df.groupby("rlnTomoName", sort=False).groups.items():
+        if tomo not in tomograms:
+            raise KeyError(f"no tomogram given for rlnTomoName={tomo!r}; have {list(tomograms)}")
+        if tilts is not None and tomo not in tilts:
             raise KeyError(f"no tilt info for {tomo!r}")
-        w = wedge_weights(box, tilts[tomo], M, apix, dose_weight, grid=kgrid)
-        h = int(subset[i]) if subset is not None and subset[i] in (1, 2) else (1 if used % 2 == 0 else 2)
-        sF[h] += w * np.fft.rfftn(sub)
-        sW[h] += w * w
-        nh[h] += 1
-        used += 1
+        idx = np.asarray(idx)
+        apix = read_header(tomograms[tomo])["apix"]
+        centres = ps.centers_px[idx] * (ps.ts_apix / apix)
+        size = chunk or max(1, -(-len(idx) // (jobs * 4)))
+        for s in range(0, len(idx), size):
+            sl = slice(s, s + size)
+            tasks.append((str(tomograms[tomo]), centres[sl], np.ascontiguousarray(mats_all[idx[sl]]),
+                          halves_all[idx[sl]], box, normalize, min_inside,
+                          None if tilts is None else tilts[tomo], dose_weight))
+
+    S = W = None
+    nh = {1: 0, 2: 0}
+    skipped = done = 0
+    apix_out = None
+
+    def add(res):
+        nonlocal S, W, skipped, done, apix_out
+        s, w, n, sk, cnt, apix = res
+        if S is None:
+            S, W = s, w
+        else:
+            for h in (1, 2):
+                S[h] += s[h]
+                W[h] += w[h]
+        for h in (1, 2):
+            nh[h] += n[h]
+        skipped += sk
+        done += cnt
+        apix_out = apix_out or apix
         if progress:
-            progress(used + skipped, len(ps))
+            progress(done, len(ps))
 
-    def finish(F, W, n):
-        return np.fft.irfftn(F / np.maximum(W, eps * max(n, 1)), s=(box,) * 3).astype(np.float32)
+    if jobs == 1 or len(tasks) == 1:
+        for t in tasks:
+            add(_accumulate(*t))
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            for res in ex.map(_accumulate, *zip(*tasks)):  # ordered -> deterministic sums
+                add(res)
 
-    avg = finish(sF[1] + sF[2], sW[1] + sW[2], used)
-    halves = tuple(finish(sF[h], sW[h], nh[h]) for h in (1, 2))
+    used = nh[1] + nh[2]
+    if tilts is not None:
+        def fin(F, Wt, n):
+            return np.fft.irfftn(F / np.maximum(Wt, wiener_eps * max(n, 1)), s=(box,) * 3).astype(np.float32)
+    else:
+        def fin(Sr, Wt, n):
+            return (Sr / np.maximum(Wt, 1e-6)).astype(np.float32)
+    avg = fin(S[1] + S[2], W[1] + W[2], used)
+    halves = (fin(S[1], W[1], nh[1]), fin(S[2], W[2], nh[2]))
     return AverageResult(avg, halves, used, skipped, apix_out)
 
 

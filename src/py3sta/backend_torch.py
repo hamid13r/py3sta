@@ -18,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .average import AverageResult
+from .average import AverageResult, half_sets
 from .io.mrc import read_mrc
 from .wedge import TiltInfo
 
@@ -137,7 +137,7 @@ def average_particles_torch(ps, tomograms: dict, box: int, rotate: bool = True, 
         acc = {h: torch.zeros((box,) * 3, dtype=torch.float64, device=device) for h in (1, 2)}
         wacc = {h: torch.zeros((box,) * 3, dtype=torch.float64, device=device) for h in (1, 2)}
     nh = {1: 0, 2: 0}
-    subset = ps.df["rlnRandomSubset"].to_numpy(int) if "rlnRandomSubset" in ps.df else None
+    halves_all = half_sets(ps)
     mats_all = ps.matrices if rotate else np.broadcast_to(np.eye(3), (len(ps), 3, 3))
     used = skipped = 0
     apix_out = None
@@ -159,12 +159,8 @@ def average_particles_torch(ps, tomograms: dict, box: int, rotate: bool = True, 
             sub, ins, bi = sub[sel], ins[sel], bi[ok]
             if normalize:
                 sub = normalize_batch(sub, ins)
-            halves = []
-            for i in bi:
-                h = int(subset[i]) if subset is not None and subset[i] in (1, 2) else (1 if used % 2 == 0 else 2)
-                halves.append(h)
-                used += 1
-            halves = torch.as_tensor(halves, device=device)
+            used += len(bi)
+            halves = torch.as_tensor(halves_all[bi], device=device)
             if tilts is not None:
                 w = wedge_weights_batch(box, tilts[tomo], mats_all[bi], apix, dose_weight, grid=kgrid)
                 Fs = torch.fft.rfftn(sub, dim=(1, 2, 3)) * w

@@ -134,8 +134,9 @@ def star2warp(star, ts_apix, output, suffix):
               help="Tilt-angle sign; auto = -1 for Warp XML with AreAnglesInverted, else +1. Check with 'py3sta wedge-check'.")
 @click.option("--dose-weight", is_flag=True, help="Weight by per-tilt exposure (Warp XML <Dose>).")
 @click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
+@click.option("-j", "--jobs", type=int, default=0, help="CPU worker processes for the numpy backend (0 = all cores).")
 def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
-            dose_weight, backend):
+            dose_weight, backend, jobs):
     """Extract particles from tomograms and write the global average.
 
     Tomograms are read from the STAR file's rlnMicrographName (paths as written,
@@ -164,12 +165,17 @@ def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_norma
             click.echo(f"  {i}/{n}")
 
     tilts = _load_tilts(tilt_files, wedge_sign, list(tomo_map)) if tilt_files else None
+    kw = dict(rotate=not no_rotate, normalize=not no_normalize, progress=prog, tilts=tilts, dose_weight=dose_weight)
     if backend == "torch":
-        from .backend_torch import average_particles_torch as avg_fn
+        from .backend_torch import average_particles_torch
+
+        res = average_particles_torch(ps, tomo_map, box, **kw)
     else:
-        avg_fn = average_particles
-    res = avg_fn(ps, tomo_map, box, rotate=not no_rotate, normalize=not no_normalize, progress=prog,
-                 tilts=tilts, dose_weight=dose_weight)
+        import os
+
+        n = jobs or os.cpu_count() or 1
+        click.echo(f"numpy backend, {n} worker process(es)")
+        res = average_particles(ps, tomo_map, box, jobs=n, **kw)
     write_mrc(output, res.average, res.apix)
     click.echo(f"averaged {res.n_used} particles ({res.n_skipped} skipped near edges) -> {output}")
     if halves:
