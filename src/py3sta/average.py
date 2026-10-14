@@ -91,14 +91,16 @@ def half_sets(ps: ParticleSet) -> np.ndarray:
     return alt
 
 
-def _accumulate(tomo_path, centres, mats, halves, box, normalize, min_inside, tilt, dose_weight):
+def _accumulate(tomo_path, centres, mats, halves, box, normalize, min_inside, tilt, dose_weight,
+                ctf_mode=None, height_sign=1.0):
     """Worker: partial sums for one chunk of particles from one tomogram (runs in a subprocess)."""
     vol, apix = read_mrc(tomo_path)
     grid = box_grid(box)
     if tilt is not None:
-        from .wedge import rfft_grid, wedge_weights
+        from .wedge import particle_defocus, rfft_grid, wedge_weights
 
         kgrid = rfft_grid(box)
+        tomo_centre = (np.array(vol.shape[::-1], float) - 1) / 2
         shp, ctype = (box, box, box // 2 + 1), np.complex128
     else:
         shp, ctype = (box,) * 3, np.float64
@@ -116,7 +118,8 @@ def _accumulate(tomo_path, centres, mats, halves, box, normalize, min_inside, ti
             s = sub[m].std()
             sub = np.where(m, (sub - sub[m].mean()) / (s if s > 0 else 1), 0).astype(np.float32)
         if tilt is not None:
-            wt = wedge_weights(box, tilt, M, apix, dose_weight, grid=kgrid)
+            dfc = particle_defocus(tilt, (np.asarray(c) - tomo_centre) * apix, height_sign) if ctf_mode else None
+            wt = wedge_weights(box, tilt, M, apix, dose_weight, grid=kgrid, defocus_A=dfc, ctf_mode=ctf_mode)
             S[h] += wt * np.fft.rfftn(sub)
             W[h] += wt * wt
         else:
@@ -129,7 +132,8 @@ def _accumulate(tomo_path, centres, mats, halves, box, normalize, min_inside, ti
 def average_particles(ps: ParticleSet, tomograms: dict, box: int, rotate: bool = True,
                       normalize: bool = True, min_inside: float = 0.9, progress=None,
                       tilts: dict | None = None, dose_weight: bool = False,
-                      wiener_eps: float = 0.05, jobs: int = 1, chunk: int | None = None) -> AverageResult:
+                      wiener_eps: float = 0.05, jobs: int = 1, chunk: int | None = None,
+                      ctf_mode: str | None = None, height_sign: float = 1.0) -> AverageResult:
     """Global average of all particles.
 
     tomograms: {rlnTomoName: path}. Particles whose box is < ``min_inside``
@@ -140,11 +144,17 @@ def average_particles(ps: ParticleSet, tomograms: dict, box: int, rotate: bool =
     Fourier space:  F = sum(w_i F_i) / max(sum(w_i^2), wiener_eps * n),
     with w_i the particle's tilt coverage rotated into the reference frame.
 
+    ctf_mode: None, "flip" (phase flipping) or "wiener" (signed CTF in the
+    weights, so the denominator becomes sum(w^2 CTF^2)); needs tilts with CTF
+    info. height_sign: direction of the per-particle defocus offset (ctf-check).
+
     jobs: number of worker processes (each reads its own chunk of particles
     from the memmapped tomogram). Results agree across ``jobs`` to float rounding.
     """
     from concurrent.futures import ProcessPoolExecutor
 
+    if ctf_mode and tilts is None:
+        raise ValueError("CTF correction needs tilt information with CTF (Warp XML)")
     halves_all = half_sets(ps)
     mats_all = ps.matrices if rotate else np.broadcast_to(np.eye(3), (len(ps), 3, 3))
     jobs = max(1, int(jobs))
@@ -162,7 +172,7 @@ def average_particles(ps: ParticleSet, tomograms: dict, box: int, rotate: bool =
             sl = slice(s, s + size)
             tasks.append((str(tomograms[tomo]), centres[sl], np.ascontiguousarray(mats_all[idx[sl]]),
                           halves_all[idx[sl]], box, normalize, min_inside,
-                          None if tilts is None else tilts[tomo], dose_weight))
+                          None if tilts is None else tilts[tomo], dose_weight, ctf_mode, height_sign))
 
     S = W = None
     nh = {1: 0, 2: 0}

@@ -26,12 +26,23 @@ import numpy as np
 
 
 @dataclass
+class CTFParams:
+    """Microscope + per-tilt defocus (Warp convention: defocus in um, positive = underfocus)."""
+    defocus_um: np.ndarray          # per used tilt, same order as TiltInfo.angles
+    voltage_kv: float = 300.0
+    cs_mm: float = 2.7
+    amplitude: float = 0.07
+    phase_shift_rad: float = 0.0
+
+
+@dataclass
 class TiltInfo:
     angles: np.ndarray                 # degrees, used tilts only
     dose: np.ndarray | None = None     # accumulated e-/A^2 per tilt (same order)
     sign: float = 1.0
     source: str = ""
     meta: dict = field(default_factory=dict)
+    ctf: CTFParams | None = None
 
     @property
     def range(self):
@@ -59,7 +70,8 @@ class TiltInfo:
         if sign is None:
             sign = -1.0 if inverted else 1.0
         return cls(ang[use], None if dose is None else dose[use], sign, str(path),
-                   {"AreAnglesInverted": inverted, "PlaneNormal": root.attrib.get("PlaneNormal")})
+                   {"AreAnglesInverted": inverted, "PlaneNormal": root.attrib.get("PlaneNormal")},
+                   _warp_ctf(root, len(ang), use))
 
     @classmethod
     def from_tlt(cls, path, sign: float = 1.0) -> "TiltInfo":
@@ -79,6 +91,74 @@ class TiltInfo:
         return cls(ang, None, sign, f"range {lo}..{hi}/{step}")
 
 
+def _warp_ctf(root, n_tilts: int, use) -> CTFParams | None:
+    """CTF block + per-tilt GridCTF defocus from a Warp tilt-series XML (None if absent)."""
+    ctf = root.find("CTF")
+    if ctf is None:
+        return None
+    par = {p.attrib.get("Name"): p.attrib.get("Value") for p in ctf}
+    base = float(par.get("Defocus", "nan"))
+    grid = root.find("GridCTF")
+    dz = np.full(n_tilts, base)
+    if grid is not None and len(grid):
+        nodes = sorted(grid, key=lambda n: int(n.attrib.get("Z", 0)))
+        vals = np.array([float(n.attrib["Value"]) for n in nodes])
+        if len(vals) == n_tilts:
+            dz = vals
+        elif len(vals) == 1:
+            dz = np.full(n_tilts, vals[0])
+    if not np.isfinite(dz).all():
+        return None
+    return CTFParams(dz[use], float(par.get("Voltage", 300)), float(par.get("Cs", 2.7)),
+                     float(par.get("Amplitude", 0.07)), float(par.get("PhaseShift", 0)) * np.pi)
+
+
+def electron_wavelength(kv: float) -> float:
+    """Relativistic electron wavelength in Angstrom."""
+    v = kv * 1e3
+    return 12.2643 / np.sqrt(v * (1 + 0.978466e-6 * v))
+
+
+def particle_defocus(tilt: TiltInfo, pos_rel_A, height_sign: float = 1.0) -> np.ndarray:
+    """Defocus (A, underfocus positive) of a particle in every tilt.
+
+    pos_rel_A: particle position (x, y, z) relative to the tomogram centre, in A.
+    In tilt t the beam direction (tomogram frame) is n = (-sin b, 0, cos b),
+    b = sign * angle; the particle's height along the beam, h = p . n, shifts
+    the tilt's defocus by ``height_sign * h``. Which sign is right depends on the
+    reconstruction's handedness: check with ``py3sta ctf-check``.
+    """
+    if tilt.ctf is None:
+        raise ValueError(f"{tilt.source}: no CTF information")
+    b = np.radians(tilt.sign * tilt.angles)
+    px, _, pz = np.asarray(pos_rel_A, float)
+    h = -px * np.sin(b) + pz * np.cos(b)
+    return tilt.ctf.defocus_um * 1e4 + height_sign * h
+
+
+def ctf_values(k_inv_A, defocus_A, ctf: CTFParams):
+    """Isotropic CTF at spatial frequency k (1/A). Sign convention: CTF(k->0) = -amplitude."""
+    lam = electron_wavelength(ctf.voltage_kv)
+    k2 = k_inv_A ** 2
+    chi = np.pi * lam * defocus_A * k2 - 0.5 * np.pi * ctf.cs_mm * 1e7 * lam ** 3 * k2 ** 2 - ctf.phase_shift_rad
+    a = ctf.amplitude
+    return -(np.sqrt(1 - a * a) * np.sin(chi) + a * np.cos(chi))
+
+
+CTF_MODES = ("flip", "wiener", "amplitude")
+
+
+def ctf_transfer(c, mode: str):
+    """Per-voxel transfer for the given correction mode (c = CTF, positive at low frequency)."""
+    if mode == "flip":
+        return np.where(c < 0, -1.0, 1.0)
+    if mode == "wiener":
+        return c
+    if mode == "amplitude":
+        return np.abs(c)
+    raise ValueError(f"ctf_mode must be one of {CTF_MODES}, not {mode!r}")
+
+
 def rfft_grid(box: int):
     """kx, ky, kz in cycles/voxel on the rfftn grid of a (box,box,box) array [z,y,x]."""
     k = np.fft.fftfreq(box).astype(np.float32)
@@ -94,11 +174,20 @@ def critical_exposure(k_inv_A):
 
 
 def wedge_weights(box: int, tilt: TiltInfo, matrix=None, apix: float | None = None,
-                  dose_weight: bool = False, soft_deg: float = 2.0, grid=None) -> np.ndarray:
+                  dose_weight: bool = False, soft_deg: float = 2.0, grid=None,
+                  defocus_A=None, ctf_mode: str | None = None) -> np.ndarray:
     """Tilt-coverage weights on the rfft grid, in the reference frame of ``matrix``.
 
     Binary wedge with a ``soft_deg`` cosine edge; with ``dose_weight`` (needs
     tilt.dose and apix) each point gets the exposure filter of its nearest tilt.
+
+    CTF (needs tilt.ctf, apix and the particle's per-tilt ``defocus_A`` from
+    ``particle_defocus``): each Fourier voxel gets the CTF of its nearest tilt
+    at |k| (3D CTF model of tilt-series reconstructions).
+    ctf_mode (see ``CTF_MODES``):
+      "flip"      sign(CTF)  - tomogram NOT CTF-corrected (plain WBP, e.g. IMOD/etomo)
+      "wiener"    CTF        - tomogram NOT CTF-corrected; also restores amplitudes
+      "amplitude" |CTF|      - tomogram already phase-flipped (Warp, novaCTF): amplitude weighting only
     """
     kx, ky, kz = grid if grid is not None else rfft_grid(box)
     if matrix is not None:
@@ -118,16 +207,28 @@ def wedge_weights(box: int, tilt: TiltInfo, matrix=None, apix: float | None = No
         w = 0.5 - 0.5 * np.cos(np.pi * w)
     else:
         w = ((beta >= lo) & (beta <= hi)).astype(np.float32)
-    if dose_weight:
-        if tilt.dose is None or apix is None:
-            raise ValueError("dose weighting needs tilt.dose and apix")
-        b_t = np.sort(tilt.sign * tilt.angles)
-        dose = tilt.dose[np.argsort(tilt.sign * tilt.angles)]
+    if dose_weight or ctf_mode:
+        if apix is None:
+            raise ValueError("dose / CTF weighting needs apix")
+        order = np.argsort(tilt.sign * tilt.angles)
+        b_t = (tilt.sign * tilt.angles)[order]
         j = np.clip(np.searchsorted(b_t, beta), 1, len(b_t) - 1)
         nearest = np.where(np.abs(beta - b_t[j - 1]) < np.abs(beta - b_t[j]), j - 1, j)
+        # on the tilt axis (ky only) every tilt samples k: use the 0-tilt
+        nearest = np.where(on_axis, np.argmin(np.abs(b_t)), nearest)
         kmag = np.sqrt(kx ** 2 + ky ** 2 + kz ** 2) / apix
-        w = w * np.exp(-dose[nearest] / (2 * critical_exposure(kmag)))
-    w = np.where(on_axis, 1.0, w)
+    if dose_weight:
+        if tilt.dose is None:
+            raise ValueError("dose weighting needs tilt.dose")
+        w = np.where(on_axis, 1.0, w) * np.exp(-tilt.dose[order][nearest] / (2 * critical_exposure(kmag)))
+    else:
+        w = np.where(on_axis, 1.0, w)
+    if ctf_mode:
+        if tilt.ctf is None or defocus_A is None:
+            raise ValueError("CTF weighting needs tilt.ctf and defocus_A")
+        # sign chosen so that low frequencies keep their contrast (c -> +amplitude at k -> 0)
+        c = -ctf_values(kmag, np.asarray(defocus_A, float)[order][nearest], tilt.ctf)
+        w = w * ctf_transfer(c, ctf_mode)
     return w.astype(np.float32)
 
 

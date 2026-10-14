@@ -121,3 +121,73 @@ def test_torch_matches_numpy(tmp_path):
     wt = T.wedge_weights_batch(16, t, M, 4.0, True, device="cpu").numpy()
     for i in range(4):
         np.testing.assert_allclose(wt[i], wedge_weights(16, t, M[i], 4.0, True), atol=1e-5)
+
+
+XML_CTF = """<?xml version="1.0" encoding="utf-16"?>
+<TiltSeries AreAnglesInverted="True">
+<Angles>-30
+0
+30</Angles>
+<UseTilt>True
+True
+False</UseTilt>
+<CTF><Param Name="Voltage" Value="300.0" /><Param Name="Cs" Value="2.7" /><Param Name="Amplitude" Value="0.07" />
+<Param Name="Defocus" Value="5.0" /><Param Name="PhaseShift" Value="0" /></CTF>
+<GridCTF Width="1" Height="1" Depth="3"><Node X="0" Y="0" Z="1" Value="4.0" /><Node X="0" Y="0" Z="0" Value="3.0" />
+<Node X="0" Y="0" Z="2" Value="5.0" /></GridCTF>
+</TiltSeries>"""
+
+
+def test_warp_xml_ctf(tmp_path):
+    p = tmp_path / "ts.xml"
+    p.write_bytes(XML_CTF.encode("utf-16"))
+    t = TiltInfo.from_warp_xml(p)
+    np.testing.assert_allclose(t.ctf.defocus_um, [3.0, 4.0])   # sorted by Z, unused tilt dropped
+    assert t.ctf.voltage_kv == 300 and t.ctf.amplitude == 0.07
+
+
+def test_ctf_zeros_and_defocus_geometry():
+    from py3sta.wedge import CTFParams, ctf_values, electron_wavelength, particle_defocus
+
+    assert abs(electron_wavelength(300) - 0.019687) < 1e-5
+    ctf = CTFParams(np.array([6.5]), cs_mm=0.0, amplitude=0.0)
+    lam = electron_wavelength(300)
+    k1 = np.sqrt(1 / (lam * 6.5e4))                         # first zero for Cs=0, A=0
+    assert abs(ctf_values(np.array([k1]), 6.5e4, ctf)[0]) < 1e-6
+    assert ctf_values(np.array([0.5 * k1]), 6.5e4, ctf)[0] < 0   # convention: negative before first zero
+    t = TiltInfo(np.array([0.0, 30.0]), None, 1.0, ctf=CTFParams(np.array([5.0, 5.0])))
+    d = particle_defocus(t, (1000.0, 0, 500.0), height_sign=1)
+    # tilt 0: height = z; tilt 30: height = -x sin30 + z cos30
+    np.testing.assert_allclose(d, [5e4 + 500, 5e4 - 500 + 500 * np.cos(np.radians(30))], atol=1e-6)
+
+
+def test_ctf_modes():
+    from py3sta.wedge import CTFParams
+
+    t = TiltInfo(np.array([-40.0, 0, 40]), None, 1.0, ctf=CTFParams(np.array([4.0, 4.0, 4.0])))
+    dfc = np.full(3, 4e4)
+    w = wedge_weights(32, t, apix=5.0, defocus_A=dfc, ctf_mode="wiener", soft_deg=0)
+    f = wedge_weights(32, t, apix=5.0, defocus_A=dfc, ctf_mode="flip", soft_deg=0)
+    a = wedge_weights(32, t, apix=5.0, defocus_A=dfc, ctf_mode="amplitude", soft_deg=0)
+    plain = wedge_weights(32, t, soft_deg=0)
+    inside = plain > 0
+    np.testing.assert_allclose(np.abs(w), a, atol=1e-6)
+    np.testing.assert_allclose(np.abs(f[inside]), 1)
+    np.testing.assert_allclose(np.sign(w[inside & (np.abs(w) > 1e-3)]), f[inside & (np.abs(w) > 1e-3)])
+    assert w[0, 0, 1] > 0                                    # low frequency keeps its contrast
+
+
+def test_torch_ctf_matches_numpy():
+    torch = pytest.importorskip("torch")
+    from py3sta import backend_torch as T
+    from py3sta.wedge import CTFParams, particle_defocus
+
+    rng = np.random.default_rng(3)
+    M = euler_to_matrix(*rng.uniform(0, 90, size=(3, 3)))
+    t = TiltInfo(np.array([-50.0, 0, 40]), np.array([5.0, 0, 10]), -1.0, ctf=CTFParams(np.array([5.0, 6.0, 7.0])))
+    dfc = np.stack([particle_defocus(t, rng.uniform(-500, 500, 3)) for _ in range(3)])
+    for mode in ("flip", "wiener", "amplitude"):
+        wt = T.wedge_weights_batch(16, t, M, 4.0, True, device="cpu", defocus_A=dfc, ctf_mode=mode).numpy()
+        for i in range(3):
+            np.testing.assert_allclose(wt[i], wedge_weights(16, t, M[i], 4.0, True, defocus_A=dfc[i], ctf_mode=mode),
+                                       atol=1e-4)

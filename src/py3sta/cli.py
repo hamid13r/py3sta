@@ -134,12 +134,18 @@ def star2warp(star, ts_apix, output, suffix):
 @click.option("--wedge-sign", type=click.Choice(["auto", "1", "-1"]), default="auto", show_default=True,
               help="Tilt-angle sign; auto = -1 for Warp XML with AreAnglesInverted, else +1. Check with 'py3sta wedge-check'.")
 @click.option("--dose-weight", is_flag=True, help="Weight by per-tilt exposure (Warp XML <Dose>).")
+@click.option("--ctf", "ctf_mode", type=click.Choice(["none", "flip", "wiener", "amplitude"]), default="none",
+              show_default=True,
+              help="CTF correction from the Warp XML. flip/wiener: tomograms WITHOUT CTF correction (IMOD/etomo WBP). "
+                   "amplitude: already phase-flipped tomograms (Warp, novaCTF). Check with 'py3sta ctf-check'.")
+@click.option("--ctf-height-sign", type=float, default=1.0, show_default=True,
+              help="Direction of the per-particle defocus offset with height (1, -1, or 0 to ignore height).")
 @click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
 @click.option("-j", "--jobs", type=int, default=0, help="CPU worker processes for the numpy backend (0 = all cores).")
 @click.option("--gpu", default="0", show_default=True,
               help="GPU for --backend torch: index (0, 1, ...) or 'cpu'. Indices follow CUDA_VISIBLE_DEVICES.")
 def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
-            dose_weight, backend, jobs, gpu, no_wedge):
+            dose_weight, backend, jobs, gpu, no_wedge, ctf_mode, ctf_height_sign):
     """Extract particles from tomograms and write the global average.
 
     Tomograms are read from the STAR file's rlnMicrographName (paths as written,
@@ -175,11 +181,18 @@ def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halv
             tilts = _load_tilts(tilt_files, wedge_sign, list(tomo_map))
         elif WARP_XML_COLUMN in ps.df:
             tilts = _tilts_from_star(ps, star, wedge_sign, list(tomo_map))
+    ctf_mode = None if ctf_mode == "none" else ctf_mode
     if tilts is None:
-        if dose_weight:
-            raise click.ClickException("--dose-weight needs tilt info (rlnWarpXMLfile or --tilt)")
+        if dose_weight or ctf_mode:
+            raise click.ClickException("--dose-weight / --ctf need tilt info (rlnWarpXMLfile or --tilt)")
         click.echo("no tilt info: plain average (add rlnWarpXMLfile with 'py3sta add-xml' for wedge weighting)")
-    kw = dict(rotate=not no_rotate, normalize=not no_normalize, progress=prog, tilts=tilts, dose_weight=dose_weight)
+    if ctf_mode:
+        no_ctf = [t for t, v in tilts.items() if v.ctf is None]
+        if no_ctf:
+            raise click.ClickException(f"--ctf: no CTF information for {no_ctf} (need Warp XML, not .tlt)")
+        click.echo(f"CTF correction: {ctf_mode} (height sign {ctf_height_sign:+g})")
+    kw = dict(rotate=not no_rotate, normalize=not no_normalize, progress=prog, tilts=tilts, dose_weight=dose_weight,
+              ctf_mode=ctf_mode, height_sign=ctf_height_sign)
     if backend == "torch":
         import torch
 
@@ -273,6 +286,63 @@ def add_xml(star, xml, output, relative, allow_missing):
     for t, p in m.items():
         click.echo(f"{t}: {p}")
     click.echo(f"{len(m)} tomogram(s) matched -> {out}")
+
+
+@main.command("ctf-check")
+@click.argument("star")
+@click.argument("reference")
+@click.option("--box", type=int, required=True)
+@click.option("-j", "--jobs", type=int, default=0, help="CPU worker processes (0 = all cores).")
+@click.option("--max-particles", type=int, default=300, show_default=True, help="Use at most this many particles.")
+def ctf_check(star, reference, box, jobs, max_particles):
+    """Is the tomogram already CTF-corrected? Which --ctf mode to use?
+
+    Averages the particles with and without phase flipping and compares each to
+    a CTF-corrected REFERENCE map (same box/pixel, aligned: e.g. a RELION/M
+    refinement) between the first and second CTF zero, where an uncorrected
+    tomogram has inverted phases. Needs rlnWarpXMLfile and rlnMicrographName.
+    Note: half-map FSC cannot answer this; both half maps share the same CTF.
+    """
+    import os
+
+    import numpy as np
+
+    from .average import average_particles, fsc, tomograms_from_star
+    from .io.mrc import read_mrc
+    from .wedge import electron_wavelength
+
+    ps = ParticleSet.from_star(star)
+    if len(ps) > max_particles:
+        ps.df = ps.df.sample(max_particles, random_state=0).reset_index(drop=True)
+    tomo_map = tomograms_from_star(ps, star)
+    tilts = _tilts_from_star(ps, star, "auto", list(tomo_map))
+    ref, _ = read_mrc(reference, mmap=False)
+    if ref.shape != (box,) * 3:
+        raise click.ClickException(f"reference is {ref.shape}, expected box {box}")
+    t0 = next(iter(tilts.values()))
+    apix = None
+    n = jobs or os.cpu_count() or 1
+    df = float(np.median(t0.ctf.defocus_um)) * 1e4
+    lam = electron_wavelength(t0.ctf.voltage_kv)
+    z1, z2 = 1 / np.sqrt(1 / (lam * df)), 1 / np.sqrt(2 / (lam * df))
+    r = np.sqrt(sum(g ** 2 for g in np.meshgrid(*[np.arange(box) - box // 2] * 3, indexing="ij")))
+    mask = 0.5 - 0.5 * np.cos(np.pi * np.clip((0.42 * box - r) / 4, 0, 1))
+    click.echo(f"median defocus {df / 1e4:.2f} um -> CTF zeros at {z1:.1f} and {z2:.1f} A; {len(ps)} particles")
+    out = {}
+    for mode in (None, "flip"):
+        res = average_particles(ps, tomo_map, box, tilts=tilts, ctf_mode=mode, jobs=n)
+        apix = res.apix
+        rr, f = fsc(res.average * mask, ref * mask, apix)
+        f = f * np.sign(f[rr > 1.3 * z1].mean())          # ignore global contrast inversion
+        out[mode] = float(f[(rr < 0.97 * z1) & (rr > 1.03 * z2)].mean())
+        click.echo(f"  {'no correction' if mode is None else 'phase flipped':14s}: correlation with reference "
+                   f"between the zeros {out[mode]:+.2f}")
+    if out[None] > 0 > out["flip"]:
+        click.echo("-> tomogram is already phase-flipped (e.g. Warp, novaCTF): use --ctf none or --ctf amplitude")
+    elif out["flip"] > 0 > out[None]:
+        click.echo("-> tomogram is NOT CTF-corrected: use --ctf flip (or wiener)")
+    else:
+        click.echo("-> inconclusive (low resolution or reference/alignment mismatch)")
 
 
 @main.command("wedge-check")

@@ -20,7 +20,7 @@ import torch.nn.functional as F
 
 from .average import AverageResult, half_sets
 from .io.mrc import read_mrc
-from .wedge import TiltInfo
+from .wedge import TiltInfo, electron_wavelength, particle_defocus
 
 
 def default_device() -> torch.device:
@@ -86,10 +86,14 @@ def rfft_grid_t(box: int, device):
 
 
 def wedge_weights_batch(box, tilt: TiltInfo, mats, apix=None, dose_weight=False, soft_deg=2.0,
-                        grid=None, device=None):
-    """(B, box, box, box//2+1) weights; same model as wedge.wedge_weights."""
+                        grid=None, device=None, defocus_A=None, ctf_mode=None):
+    """(B, box, box, box//2+1) weights; same model as wedge.wedge_weights.
+
+    defocus_A: (B, n_tilts) per-particle defocus (wedge.particle_defocus), needed for ctf_mode.
+    """
     kx, ky, kz = grid if grid is not None else rfft_grid_t(box, device)
-    m = torch.as_tensor(np.asarray(mats, np.float32), device=kx.device)  # (B,3,3)
+    dev = kx.device
+    m = torch.as_tensor(np.asarray(mats, np.float32), device=dev)  # (B,3,3)
     k = torch.stack([kx, ky, kz], -1)                                   # (...,3)
     kt = torch.einsum("zyxj,bji->bzyxi", k, m)                          # M.T @ k
     tx, ty, tz = kt.unbind(-1)
@@ -105,18 +109,42 @@ def wedge_weights_batch(box, tilt: TiltInfo, mats, apix=None, dose_weight=False,
         w = 0.5 - 0.5 * torch.cos(math.pi * w)
     else:
         w = ((beta >= lo) & (beta <= hi)).float()
-    if dose_weight:
-        if tilt.dose is None or apix is None:
-            raise ValueError("dose weighting needs tilt.dose and apix")
+    w = torch.where(on_axis, torch.ones_like(w), w)
+    if dose_weight or ctf_mode:
+        if apix is None:
+            raise ValueError("dose / CTF weighting needs apix")
         order = np.argsort(tilt.sign * tilt.angles)
-        b_t = torch.as_tensor((tilt.sign * tilt.angles)[order], dtype=torch.float32, device=kx.device)
-        dose = torch.as_tensor(tilt.dose[order], dtype=torch.float32, device=kx.device)
+        b_np = (tilt.sign * tilt.angles)[order]
+        b_t = torch.as_tensor(b_np, dtype=torch.float32, device=dev)
         j = torch.searchsorted(b_t, beta.contiguous()).clamp(1, len(b_t) - 1)
         nearest = torch.where((beta - b_t[j - 1]).abs() < (beta - b_t[j]).abs(), j - 1, j)
+        nearest = torch.where(on_axis, torch.full_like(nearest, int(np.argmin(np.abs(b_np)))), nearest)
         kmag = (kt ** 2).sum(-1).sqrt() / apix
+    if dose_weight:
+        if tilt.dose is None:
+            raise ValueError("dose weighting needs tilt.dose")
+        dose = torch.as_tensor(tilt.dose[order], dtype=torch.float32, device=dev)
         ne = 0.245 * kmag.clamp_min(1e-4) ** -1.665 + 2.81  # == wedge.critical_exposure
         w = w * torch.exp(-dose[nearest] / (2 * ne))
-    return torch.where(on_axis, torch.ones_like(w), w)
+    if ctf_mode:
+        if tilt.ctf is None or defocus_A is None:
+            raise ValueError("CTF weighting needs tilt.ctf and defocus_A")
+        df = torch.as_tensor(np.asarray(defocus_A, np.float32)[:, order], device=dev)   # (B, T)
+        dfv = torch.gather(df, 1, nearest.reshape(len(df), -1)).reshape(nearest.shape)
+        ctf = tilt.ctf
+        lam = electron_wavelength(ctf.voltage_kv)
+        k2 = kmag ** 2
+        chi = math.pi * lam * dfv * k2 - 0.5 * math.pi * ctf.cs_mm * 1e7 * lam ** 3 * k2 ** 2 - ctf.phase_shift_rad
+        a = ctf.amplitude
+        c = math.sqrt(1 - a * a) * torch.sin(chi) + a * torch.cos(chi)   # = -ctf_values (positive at k->0)
+        if ctf_mode == "flip":
+            c = torch.where(c < 0, -torch.ones_like(c), torch.ones_like(c))
+        elif ctf_mode == "amplitude":
+            c = c.abs()
+        elif ctf_mode != "wiener":
+            raise ValueError(f"unknown ctf_mode {ctf_mode!r}")
+        w = w * c
+    return w
 
 
 # ------------------------------------------------------------------- average
@@ -124,7 +152,8 @@ def wedge_weights_batch(box, tilt: TiltInfo, mats, apix=None, dose_weight=False,
 def average_particles_torch(ps, tomograms: dict, box: int, rotate: bool = True, normalize: bool = True,
                             min_inside: float = 0.9, progress=None, tilts: dict | None = None,
                             dose_weight: bool = False, wiener_eps: float = 0.05,
-                            device=None, batch: int = 32) -> AverageResult:
+                            device=None, batch: int = 32, ctf_mode: str | None = None,
+                            height_sign: float = 1.0, jobs=None) -> AverageResult:
     """Same semantics as average.average_particles, on the GPU."""
     device = torch.device(device) if device is not None else default_device()
     grid = box_grid_t(box, device)
@@ -148,6 +177,7 @@ def average_particles_torch(ps, tomograms: dict, box: int, rotate: bool = True, 
         apix_out = apix_out or apix
         idx = np.asarray(idx)
         centres = ps.centers_px[idx] * (ps.ts_apix / apix)
+        tomo_centre = (np.array(vol.shape[::-1], float) - 1) / 2
         for s in range(0, len(idx), batch):
             bi = idx[s:s + batch]
             sub, ins = extract_batch(vol, centres[s:s + batch], mats_all[bi], box, device, grid)
@@ -156,13 +186,17 @@ def average_particles_torch(ps, tomograms: dict, box: int, rotate: bool = True, 
             if not ok.any():
                 continue
             sel = torch.as_tensor(np.nonzero(ok)[0], device=device)
+            cen = centres[s:s + batch][ok]
             sub, ins, bi = sub[sel], ins[sel], bi[ok]
             if normalize:
                 sub = normalize_batch(sub, ins)
             used += len(bi)
             halves = torch.as_tensor(halves_all[bi], device=device)
             if tilts is not None:
-                w = wedge_weights_batch(box, tilts[tomo], mats_all[bi], apix, dose_weight, grid=kgrid)
+                dfc = (np.stack([particle_defocus(tilts[tomo], (c - tomo_centre) * apix, height_sign) for c in cen])
+                       if ctf_mode else None)
+                w = wedge_weights_batch(box, tilts[tomo], mats_all[bi], apix, dose_weight, grid=kgrid,
+                                        defocus_A=dfc, ctf_mode=ctf_mode)
                 Fs = torch.fft.rfftn(sub, dim=(1, 2, 3)) * w
                 w2 = w * w
             for h in (1, 2):

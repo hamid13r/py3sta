@@ -47,6 +47,20 @@ py3sta average particles_xml.star --box 72 --dose-weight --backend torch --gpu 1
 python scripts/check_torch.py particles.star TOMO.mrc --tilt TOMO.mrc.xml   # GPU vs numpy check + timing
 ```
 
+### CTF
+
+`--ctf` uses the per-tilt defocus in the Warp XML (`rlnWarpXMLfile`), shifted by each particle's height in
+every tilt, and applies the CTF of each Fourier voxel's nearest tilt (3D CTF model):
+
+| tomogram | `--ctf` |
+|---|---|
+| not CTF-corrected (IMOD/etomo WBP) | `flip` or `wiener` |
+| already phase-flipped (Warp `ts_reconstruct`, novaCTF) | `none` (default) or `amplitude` |
+
+`py3sta ctf-check particles_xml.star reference.mrc --box 72` tells which case applies by comparing averages
+with a CTF-corrected reference between the first two CTF zeros. Half-map FSC cannot tell (both halves share
+the same CTF error). On MIM019: Warp and novaCTF tomograms are phase-flipped; the etomo tomogram is not.
+
 FSC is reported as first and last 0.143 crossing: without CTF correction, all particles of a tomogram
 share similar defocus, so the FSC dips at CTF zeros (MIM019: ~37, 26, 21 A) before the real limit.
 
