@@ -135,8 +135,10 @@ def star2warp(star, ts_apix, output, suffix):
 @click.option("--dose-weight", is_flag=True, help="Weight by per-tilt exposure (Warp XML <Dose>).")
 @click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
 @click.option("-j", "--jobs", type=int, default=0, help="CPU worker processes for the numpy backend (0 = all cores).")
+@click.option("--gpu", default="0", show_default=True,
+              help="GPU for --backend torch: index (0, 1, ...) or 'cpu'. Indices follow CUDA_VISIBLE_DEVICES.")
 def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
-            dose_weight, backend, jobs):
+            dose_weight, backend, jobs, gpu):
     """Extract particles from tomograms and write the global average.
 
     Tomograms are read from the STAR file's rlnMicrographName (paths as written,
@@ -167,9 +169,21 @@ def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_norma
     tilts = _load_tilts(tilt_files, wedge_sign, list(tomo_map)) if tilt_files else None
     kw = dict(rotate=not no_rotate, normalize=not no_normalize, progress=prog, tilts=tilts, dose_weight=dose_weight)
     if backend == "torch":
+        import torch
+
         from .backend_torch import average_particles_torch
 
-        res = average_particles_torch(ps, tomo_map, box, **kw)
+        if gpu == "cpu":
+            device = torch.device("cpu")
+        else:
+            if not torch.cuda.is_available():
+                raise click.ClickException("CUDA is not available to PyTorch; use --gpu cpu or the numpy backend")
+            n = torch.cuda.device_count()
+            if not gpu.isdigit() or int(gpu) >= n:
+                raise click.ClickException(f"--gpu {gpu}: {n} GPU(s) visible (indices 0..{n - 1})")
+            device = torch.device(f"cuda:{gpu}")
+        click.echo(f"torch backend on {device}" + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""))
+        res = average_particles_torch(ps, tomo_map, box, device=device, **kw)
     else:
         import os
 

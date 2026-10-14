@@ -28,9 +28,10 @@ def main():
     ap.add_argument("--tilt")
     ap.add_argument("--box", type=int, default=72)
     ap.add_argument("--n", type=int, default=100, help="particles used for the comparison")
+    ap.add_argument("--gpu", default=None, help="GPU index or 'cpu' (default: cuda:0 if available)")
     a = ap.parse_args()
 
-    dev = T.default_device()
+    dev = T.default_device() if a.gpu is None else torch.device("cpu" if a.gpu == "cpu" else f"cuda:{a.gpu}")
     print(f"torch {torch.__version__}, device {dev}"
           + (f" ({torch.cuda.get_device_name(0)}, CUDA {torch.version.cuda})" if dev.type == "cuda" else ""))
     ps = ParticleSet.from_star(a.star)
