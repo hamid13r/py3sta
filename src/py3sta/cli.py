@@ -121,8 +121,9 @@ def star2warp(star, ts_apix, output, suffix):
 
 @main.command()
 @click.argument("star")
-@click.argument("tomograms", nargs=-1, required=True)
+@click.argument("tomograms", nargs=-1)
 @click.option("--box", type=int, required=True, help="Box size in tomogram voxels.")
+@click.option("--tomo-dir", type=click.Path(file_okay=False), help="Directory holding the tomograms named in rlnMicrographName.")
 @click.option("--ts-apix", type=float, help="Pixel size of STAR coordinates if not in the file (rlnTomoTiltSeriesPixelSize/rlnImagePixelSize).")
 @click.option("-o", "--output", default="average.mrc", show_default=True)
 @click.option("--no-rotate", is_flag=True, help="Ignore angles (raw, unaligned sum).")
@@ -133,16 +134,26 @@ def star2warp(star, ts_apix, output, suffix):
               help="Tilt-angle sign; auto = -1 for Warp XML with AreAnglesInverted, else +1. Check with 'py3sta wedge-check'.")
 @click.option("--dose-weight", is_flag=True, help="Weight by per-tilt exposure (Warp XML <Dose>).")
 @click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
-def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
+def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
             dose_weight, backend):
-    """Extract particles from tomograms and write the global average."""
+    """Extract particles from tomograms and write the global average.
+
+    Tomograms are read from the STAR file's rlnMicrographName (paths as written,
+    or relative to the STAR file, or inside --tomo-dir). Listing TOMOGRAMS on the
+    command line overrides that.
+    """
     import numpy as np
 
-    from .average import average_particles, fsc, map_tomograms, resolution_at
+    from .average import average_particles, fsc, map_tomograms, resolution_at, tomograms_from_star
     from .io.mrc import write_mrc
 
     ps = ParticleSet.from_star(star, ts_apix)
-    tomo_map = map_tomograms(ps, tomograms)
+    try:
+        tomo_map = map_tomograms(ps, tomograms) if tomograms else tomograms_from_star(ps, star, tomo_dir)
+    except (ValueError, FileNotFoundError) as e:
+        raise click.ClickException(str(e))
+    for n, p in tomo_map.items():
+        click.echo(f"tomogram {n}: {p}")
     missing = set(ps.df.rlnTomoName) - set(tomo_map)
     if missing:
         click.echo(f"warning: no tomogram for {sorted(missing)}; those particles are skipped")

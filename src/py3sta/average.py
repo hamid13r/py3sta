@@ -224,6 +224,41 @@ def resolution_at(res, f, threshold=0.143, mode: str = "first"):
     return float(1 / (s0 + t * (s1 - s0)))
 
 
+def tomograms_from_star(ps: ParticleSet, star_path, tomo_dir=None) -> dict:
+    """{rlnTomoName: tomogram path} taken from the STAR file's rlnMicrographName.
+
+    Each path is resolved in this order: ``tomo_dir/<name>`` if ``tomo_dir`` is
+    given; otherwise as written (absolute, or relative to the current
+    directory); otherwise relative to the STAR file's directory (RELION
+    convention: paths relative to the project directory).
+    """
+    if "rlnMicrographName" not in ps.df:
+        raise ValueError("STAR file has no rlnMicrographName column; pass tomogram files explicitly")
+    star_dir = Path(star_path).resolve().parent
+    pairs = ps.df[["rlnTomoName", "rlnMicrographName"]].astype(str).drop_duplicates()
+    clash = pairs[pairs.duplicated("rlnTomoName", keep=False)]
+    if not clash.empty:
+        raise ValueError("several rlnMicrographName values share one rlnTomoName: "
+                         + ", ".join(sorted(clash.rlnMicrographName)[:4]))
+    out, missing = {}, []
+    for tomo, name in pairs.itertuples(index=False):
+        cands = [Path(tomo_dir) / name, Path(tomo_dir) / Path(name).name] if tomo_dir else \
+                [Path(name), star_dir / name]
+        hit = next((c for c in cands if c.is_file()), None)
+        if hit is None:
+            missing.append(name)
+        else:
+            out[tomo] = hit
+    if missing:
+        hint = (" (these are Warp .tomostar names, not tomogram files: put the reconstructed .mrc paths in "
+                "rlnMicrographName or pass the tomograms on the command line)"
+                if any(m.endswith(".tomostar") for m in missing) else "")
+        looked = f"in {tomo_dir}" if tomo_dir else f"relative to {Path.cwd()} and {star_dir}"
+        raise FileNotFoundError(f"{len(missing)} tomogram(s) from rlnMicrographName not found {looked}: "
+                                + ", ".join(missing[:5]) + hint)
+    return out
+
+
 def map_tomograms(ps: ParticleSet, paths) -> dict:
     """Match tomogram files to rlnTomoName by stripped file name; one file + one tomo => direct."""
     names = list(dict.fromkeys(ps.df["rlnTomoName"]))

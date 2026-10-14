@@ -42,3 +42,23 @@ def test_rotation_convention_and_average(tmp_path):
     a = res.average
     assert a[12, 12, 16] > 0.3 and a[12, 14, 12] > 0.3      # arms recovered on +x and +y
     assert a[12, 12, 8] < 0.1 and a[12, 10, 12] < 0.1       # not mirrored
+
+
+def test_tomograms_from_star(tmp_path):
+    import pytest as _pytest
+    from py3sta.average import tomograms_from_star
+
+    (tmp_path / "tomos").mkdir()
+    for n in ("TS_01", "TS_02"):
+        write_mrc(tmp_path / "tomos" / f"{n}.mrc", np.zeros((4, 4, 4), np.float32), 1.0)
+    df = pd.DataFrame({"rlnMicrographName": ["tomos/TS_01.mrc", "tomos/TS_02.mrc", "tomos/TS_01.mrc"],
+                       "rlnCoordinateX": [1.0, 2, 3], "rlnCoordinateY": [1.0, 2, 3], "rlnCoordinateZ": [1.0, 2, 3]})
+    from py3sta.io.star import write_star
+    write_star({"particles": df}, tmp_path / "p.star")
+    ps = ParticleSet.from_star(tmp_path / "p.star", ts_apix=1.0)
+    m = tomograms_from_star(ps, tmp_path / "p.star")             # relative to the STAR file
+    assert {k: v.name for k, v in m.items()} == {"TS_01": "TS_01.mrc", "TS_02": "TS_02.mrc"}
+    m = tomograms_from_star(ps, "elsewhere.star", tomo_dir=tmp_path / "tomos")  # --tomo-dir
+    assert len(m) == 2
+    with _pytest.raises(FileNotFoundError, match="not found"):
+        tomograms_from_star(ps, "elsewhere.star")

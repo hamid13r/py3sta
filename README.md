@@ -31,9 +31,12 @@ py3sta star2warp particles.star -o particles_warp.star
 
 ## Averaging
 
+Tomograms are read from `rlnMicrographName` (absolute, relative to the current directory or to the
+STAR file, or inside `--tomo-dir`). Listing tomogram files after the STAR file overrides this.
+
 ```bash
 py3sta wedge-check TOMO.mrc TOMO.mrc.xml          # which tilt-angle sign matches the data (Warp: -1)
-py3sta average particles.star TOMO.mrc --box 72 --tilt TOMO.mrc.xml --dose-weight --backend torch -o avg.mrc
+py3sta average particles.star --box 72 --tilt TOMO.mrc.xml --dose-weight --backend torch -o avg.mrc
 python scripts/check_torch.py particles.star TOMO.mrc --tilt TOMO.mrc.xml   # GPU vs numpy check + timing
 ```
 
