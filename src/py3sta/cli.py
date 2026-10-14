@@ -9,6 +9,7 @@ import click
 
 from .io.dipole import dipoles_to_particles
 from .io.particles import DEFAULT_TOMO_REGEX, ParticleSet
+from .utils.add_warp_xml import WARP_XML_COLUMN
 
 
 def _expand(patterns):
@@ -123,13 +124,13 @@ def star2warp(star, ts_apix, output, suffix):
 @click.argument("star")
 @click.argument("tomograms", nargs=-1)
 @click.option("--box", type=int, required=True, help="Box size in tomogram voxels.")
-@click.option("--tomo-dir", type=click.Path(file_okay=False), help="Directory holding the tomograms named in rlnMicrographName.")
 @click.option("--ts-apix", type=float, help="Pixel size of STAR coordinates if not in the file (rlnTomoTiltSeriesPixelSize/rlnImagePixelSize).")
 @click.option("-o", "--output", default="average.mrc", show_default=True)
 @click.option("--no-rotate", is_flag=True, help="Ignore angles (raw, unaligned sum).")
 @click.option("--no-normalize", is_flag=True, help="Don't normalise each subvolume to mean 0 / std 1.")
 @click.option("--halves/--no-halves", default=True, show_default=True, help="Also write half maps + FSC.")
-@click.option("--tilt", "tilt_files", multiple=True, help="Warp .xml or .tlt per tomogram (repeatable) -> wedge-weighted average.")
+@click.option("--tilt", "tilt_files", multiple=True, help="Warp .xml or .tlt per tomogram (repeatable); overrides rlnWarpXMLfile.")
+@click.option("--no-wedge", is_flag=True, help="Ignore tilt information (plain real-space average).")
 @click.option("--wedge-sign", type=click.Choice(["auto", "1", "-1"]), default="auto", show_default=True,
               help="Tilt-angle sign; auto = -1 for Warp XML with AreAnglesInverted, else +1. Check with 'py3sta wedge-check'.")
 @click.option("--dose-weight", is_flag=True, help="Weight by per-tilt exposure (Warp XML <Dose>).")
@@ -137,13 +138,15 @@ def star2warp(star, ts_apix, output, suffix):
 @click.option("-j", "--jobs", type=int, default=0, help="CPU worker processes for the numpy backend (0 = all cores).")
 @click.option("--gpu", default="0", show_default=True,
               help="GPU for --backend torch: index (0, 1, ...) or 'cpu'. Indices follow CUDA_VISIBLE_DEVICES.")
-def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
-            dose_weight, backend, jobs, gpu):
+def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
+            dose_weight, backend, jobs, gpu, no_wedge):
     """Extract particles from tomograms and write the global average.
 
     Tomograms are read from the STAR file's rlnMicrographName (paths as written,
-    or relative to the STAR file, or inside --tomo-dir). Listing TOMOGRAMS on the
-    command line overrides that.
+    or relative to the STAR file). Listing TOMOGRAMS on the command line overrides that.
+
+    Wedge weighting uses the Warp XML in rlnWarpXMLfile (add it with 'py3sta add-xml')
+    or the files given with --tilt; --no-wedge turns it off.
     """
     import numpy as np
 
@@ -152,7 +155,7 @@ def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_norma
 
     ps = ParticleSet.from_star(star, ts_apix)
     try:
-        tomo_map = map_tomograms(ps, tomograms) if tomograms else tomograms_from_star(ps, star, tomo_dir)
+        tomo_map = map_tomograms(ps, tomograms) if tomograms else tomograms_from_star(ps, star)
     except (ValueError, FileNotFoundError) as e:
         raise click.ClickException(str(e))
     for n, p in tomo_map.items():
@@ -166,7 +169,16 @@ def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_norma
         if i % 50 == 0 or i == n:
             click.echo(f"  {i}/{n}")
 
-    tilts = _load_tilts(tilt_files, wedge_sign, list(tomo_map)) if tilt_files else None
+    tilts = None
+    if not no_wedge:
+        if tilt_files:
+            tilts = _load_tilts(tilt_files, wedge_sign, list(tomo_map))
+        elif WARP_XML_COLUMN in ps.df:
+            tilts = _tilts_from_star(ps, star, wedge_sign, list(tomo_map))
+    if tilts is None:
+        if dose_weight:
+            raise click.ClickException("--dose-weight needs tilt info (rlnWarpXMLfile or --tilt)")
+        click.echo("no tilt info: plain average (add rlnWarpXMLfile with 'py3sta add-xml' for wedge weighting)")
     kw = dict(rotate=not no_rotate, normalize=not no_normalize, progress=prog, tilts=tilts, dose_weight=dose_weight)
     if backend == "torch":
         import torch
@@ -202,23 +214,65 @@ def average(star, tomograms, box, tomo_dir, ts_apix, output, no_rotate, no_norma
                    f"last crossing {resolution_at(r, f, mode='last'):.1f} A (dips at CTF zeros if not CTF-corrected)")
 
 
+def _report_tilts(out):
+    for n, t in out.items():
+        click.echo(f"wedge {n}: {len(t.angles)} tilts, coverage {t.range[0]:.1f}..{t.range[1]:.1f} deg (sign {t.sign:+.0f})")
+
+
+def _tilts_from_star(ps, star, sign, tomo_names):
+    from .average import per_tomo_files
+    from .wedge import TiltInfo
+
+    sgn = None if sign == "auto" else float(sign)
+    try:
+        files = per_tomo_files(ps, star, WARP_XML_COLUMN)
+    except (ValueError, FileNotFoundError) as e:
+        raise click.ClickException(str(e))
+    out = {t: TiltInfo.from_warp_xml(files[t], sgn) for t in tomo_names if t in files}
+    _report_tilts(out)
+    return out
+
+
 def _load_tilts(files, sign, tomo_names):
-    from .io.particles import tomo_name_from
+    from .io.particles import tomo_key
     from .wedge import TiltInfo
 
     sgn = None if sign == "auto" else float(sign)
     out = {}
     for f in files:
-        name = tomo_name_from(Path(f).name.removesuffix(".xml").removesuffix(".tlt"))
+        name = tomo_key(Path(f).name.removesuffix(".tlt"))
         if f.endswith(".xml"):
             out[name] = TiltInfo.from_warp_xml(f, sgn)
         else:
             out[name] = TiltInfo.from_tlt(f, sgn if sgn is not None else 1.0)
     if len(files) == 1 and len(tomo_names) == 1:
         out = {tomo_names[0]: next(iter(out.values()))}
-    for n, t in out.items():
-        click.echo(f"wedge {n}: {len(t.angles)} tilts, coverage {t.range[0]:.1f}..{t.range[1]:.1f} deg (sign {t.sign:+.0f})")
+    _report_tilts(out)
     return out
+
+
+@main.command("add-xml")
+@click.argument("star")
+@click.argument("xml", nargs=-1, required=True)
+@click.option("-o", "--output", help="Output STAR (default: <input>_xml.star).")
+@click.option("--relative", is_flag=True, help="Write paths relative to the output STAR file (default: absolute).")
+@click.option("--allow-missing", is_flag=True, help="Leave tomograms without an XML empty instead of failing.")
+def add_xml(star, xml, output, relative, allow_missing):
+    """Add rlnWarpXMLfile to a particle STAR file.
+
+    XML can be files, directories or glob patterns. Each particle gets the Warp
+    tilt-series XML whose name matches its tomogram (TS_01.mrc.xml <-> TS_01).
+    """
+    from .utils.add_warp_xml import attach_warp_xml
+
+    out = output or str(Path(star).with_suffix("")) + "_xml.star"
+    try:
+        m = attach_warp_xml(star, xml, out, relative, allow_missing)
+    except (ValueError, FileNotFoundError) as e:
+        raise click.ClickException(str(e))
+    for t, p in m.items():
+        click.echo(f"{t}: {p}")
+    click.echo(f"{len(m)} tomogram(s) matched -> {out}")
 
 
 @main.command("wedge-check")

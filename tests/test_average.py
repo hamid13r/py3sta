@@ -58,7 +58,5 @@ def test_tomograms_from_star(tmp_path):
     ps = ParticleSet.from_star(tmp_path / "p.star", ts_apix=1.0)
     m = tomograms_from_star(ps, tmp_path / "p.star")             # relative to the STAR file
     assert {k: v.name for k, v in m.items()} == {"TS_01": "TS_01.mrc", "TS_02": "TS_02.mrc"}
-    m = tomograms_from_star(ps, "elsewhere.star", tomo_dir=tmp_path / "tomos")  # --tomo-dir
-    assert len(m) == 2
     with _pytest.raises(FileNotFoundError, match="not found"):
         tomograms_from_star(ps, "elsewhere.star")

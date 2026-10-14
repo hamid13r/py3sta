@@ -33,6 +33,24 @@ SUBTOMO_ANG = ["rlnTomoSubtomogramRot", "rlnTomoSubtomogramTilt", "rlnTomoSubtom
 DEFAULT_TOMO_REGEX = r"\.mrc.*$"  # 'TS_01.mrc_13.30Apx.mrc' -> 'TS_01'
 
 
+# 'TS_01.mrc_6.65Apx.mrc', 'TS_01.mrc.tomostar', 'TS_01.mrc.xml', 'TS_01.tomostar.xml', 'TS_01.xml' -> 'TS_01'
+TOMO_KEY_REGEX = r"\.(tomostar|xml|mrc)(?![a-z]).*$"
+
+
+def tomo_key(name) -> str:
+    """Tomogram / tilt-series name from a tomogram, .tomostar or Warp .xml file name."""
+    return re.sub(TOMO_KEY_REGEX, "", Path(str(name)).name)
+
+
+def tomo_names_of(df: pd.DataFrame) -> pd.Series:
+    """rlnTomoName if present, else derived from rlnMicrographName."""
+    if "rlnTomoName" in df:
+        return df["rlnTomoName"].astype(str)
+    if "rlnMicrographName" not in df:
+        raise ValueError("need rlnTomoName or rlnMicrographName")
+    return df["rlnMicrographName"].map(tomo_key)
+
+
 def tomo_name_from(name: str, strip_regex: str | None = DEFAULT_TOMO_REGEX) -> str:
     name = Path(str(name)).name
     return re.sub(strip_regex, "", name) if strip_regex else name
@@ -187,10 +205,7 @@ class ParticleSet:
             df = next(iter(blocks.values())).copy()
         if ts_apix is None:
             raise ValueError("pixel size unknown: pass ts_apix (no rlnTomoTiltSeriesPixelSize in file)")
-        if "rlnTomoName" not in df:
-            if "rlnMicrographName" not in df:
-                raise ValueError("need rlnTomoName or rlnMicrographName")
-            df["rlnTomoName"] = df["rlnMicrographName"].map(lambda n: re.sub(r"\.(tomostar|mrc.*)$", "", Path(str(n)).name))
+        df["rlnTomoName"] = tomo_names_of(df)
         if any(c in df for c in SUBTOMO_ANG):
             sub = df.reindex(columns=SUBTOMO_ANG).fillna(0).to_numpy(float)
             if np.abs(sub).max() > 1e-6:
