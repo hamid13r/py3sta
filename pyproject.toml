@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py3"
+version = "0.0.1"
+description = "GPU-accelerated i3-style subtomogram averaging, RELION 4 / Warp compatible"
+requires-python = ">=3.9"
+dependencies = ["numpy", "pandas", "click"]
+
+[project.optional-dependencies]
+test = ["pytest", "scipy"]
+# CUDA 12.x driver: pip install torch --index-url https://download.pytorch.org/whl/cu121
+gpu = ["torch>=2.1"]
+
+[project.scripts]
+py3 = "py3.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

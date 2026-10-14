@@ -1,0 +1,15 @@
+# data: tomograms, averages, results (large)
+data/
+*.mrc
+*.mrcs
+*.rec
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+# OS
+.DS_Store
