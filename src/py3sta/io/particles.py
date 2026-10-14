@@ -78,7 +78,7 @@ class ParticleSet:
 
         tomo_names: optional {trf-file-stem or particle name -> tomogram name}.
         Otherwise the tomogram name is the particle name with ``_<7 digits>``
-        (py3 particle index) and ``strip_regex`` removed.
+        (py3sta particle index) and ``strip_regex`` removed.
         """
         ts_apix = ts_apix or tomo_apix
         s = tomo_apix / ts_apix
@@ -169,7 +169,7 @@ class ParticleSet:
             df["rlnMicrographName"] = df["rlnTomoName"] + micrograph_suffix
         lead = ["rlnTomoName", "rlnTomoParticleName", *XYZ, *ORI, *ANG]
         cols = lead + [c for c in df.columns if c not in lead]
-        # STAR labels must be rln*; keep py3 bookkeeping columns too (RELION ignores unknown labels)
+        # STAR labels must be rln*; keep py3sta bookkeeping columns too (RELION ignores unknown labels)
         write_star({"optics": self.optics(), "particles": df[cols]}, path)
 
     @classmethod

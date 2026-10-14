@@ -2,11 +2,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from py3.geometry import euler_to_matrix, frame_from_normal, is_rotation, matrix_to_euler, relion_A
-from py3.io.dipole import dipoles_to_particles
-from py3.io.particles import ParticleSet
-from py3.io.star import read_star
-from py3.io.trf import matrices, read_trf
+from py3sta.geometry import euler_to_matrix, frame_from_normal, is_rotation, matrix_to_euler, relion_A
+from py3sta.io.dipole import dipoles_to_particles
+from py3sta.io.particles import ParticleSet
+from py3sta.io.star import read_star
+from py3sta.io.trf import matrices, read_trf
 
 # three real lines from the i3 protocol docs (getting_started.md)
 TRF_DOC = """\
@@ -85,7 +85,7 @@ def test_legacy_trf2star_equivalence(tmp_path):
 def test_trf_star_trf_roundtrip(tmp_path):
     t = read_trf(_doc_trf(tmp_path))
     t.loc[:, ["dx", "dy", "dz"]] = [[0.3, -0.2, 0.1], [0.0, 0.4, -0.45], [-0.1, 0.0, 0.2]]
-    from py3.io.trf import write_trf
+    from py3sta.io.trf import write_trf
     write_trf(t, tmp_path / "in.trf")
     ps = ParticleSet.from_trf(tmp_path / "in.trf", tomo_apix=13.3, ts_apix=1.33)
     assert set(ps.df.rlnTomoName) == {"NAD054_1_lam12_ts_004"}

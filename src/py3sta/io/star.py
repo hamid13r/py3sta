@@ -64,7 +64,7 @@ def _fmt(v) -> str:
 
 
 def write_star(blocks: dict[str, pd.DataFrame], path) -> None:
-    out = ["", "# written by py3", ""]
+    out = ["", "# written by py3sta", ""]
     for name, df in blocks.items():
         out += [f"data_{name}", "", "loop_"]
         out += [f"_{c} #{i + 1}" for i, c in enumerate(df.columns)]

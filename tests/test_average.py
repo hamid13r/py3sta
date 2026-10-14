@@ -1,10 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from py3.average import average_particles, extract
-from py3.geometry import euler_to_matrix
-from py3.io.mrc import read_mrc, write_mrc
-from py3.io.particles import ParticleSet
+from py3sta.average import average_particles, extract
+from py3sta.geometry import euler_to_matrix
+from py3sta.io.mrc import read_mrc, write_mrc
+from py3sta.io.particles import ParticleSet
 
 
 def test_identity_extract_equals_crop():

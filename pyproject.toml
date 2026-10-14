@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "py3"
+name = "py3sta"
 version = "0.0.1"
 description = "GPU-accelerated i3-style subtomogram averaging, RELION 4 / Warp compatible"
 requires-python = ">=3.9"
@@ -15,7 +15,7 @@ test = ["pytest", "scipy"]
 gpu = ["torch>=2.1"]
 
 [project.scripts]
-py3 = "py3.cli:main"
+py3sta = "py3sta.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

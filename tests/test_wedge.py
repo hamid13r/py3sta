@@ -2,10 +2,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from py3.geometry import euler_to_matrix
-from py3.io.mrc import write_mrc
-from py3.io.particles import ParticleSet
-from py3.wedge import TiltInfo, rfft_grid, wedge_weights
+from py3sta.geometry import euler_to_matrix
+from py3sta.io.mrc import write_mrc
+from py3sta.io.particles import ParticleSet
+from py3sta.wedge import TiltInfo, rfft_grid, wedge_weights
 
 XML = """<?xml version="1.0" encoding="utf-16"?>
 <TiltSeries AreAnglesInverted="True">
@@ -70,7 +70,7 @@ def test_dose_weights_decrease():
 
 def test_wedge_average_recovers_object(tmp_path):
     """Wedge-weighted average of randomly oriented copies matches the object."""
-    from py3.average import average_particles
+    from py3sta.average import average_particles
 
     box = 20
     z, y, x = np.mgrid[:box, :box, :box] - box // 2
@@ -80,7 +80,7 @@ def test_wedge_average_recovers_object(tmp_path):
     vol = np.zeros((box, box, box * n), np.float32)
     rows = []
     t = TiltInfo.from_range(-60, 60, 2)
-    from py3.average import box_grid, _trilinear
+    from py3sta.average import box_grid, _trilinear
     g = box_grid(box).reshape(-1, 3)
     for i in range(n):
         e = (rng.uniform(-180, 180), np.degrees(np.arccos(rng.uniform(-1, 1))), rng.uniform(-180, 180))
@@ -107,8 +107,8 @@ def test_wedge_average_recovers_object(tmp_path):
 
 def test_torch_matches_numpy(tmp_path):
     torch = pytest.importorskip("torch")
-    from py3 import average as A
-    from py3 import backend_torch as T
+    from py3sta import average as A
+    from py3sta import backend_torch as T
 
     rng = np.random.default_rng(2)
     vol = rng.normal(size=(60, 70, 80)).astype(np.float32)

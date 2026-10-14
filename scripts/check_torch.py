@@ -10,11 +10,11 @@ import time
 import numpy as np
 import torch
 
-from py3 import average as A
-from py3 import backend_torch as T
-from py3.io.mrc import read_mrc
-from py3.io.particles import ParticleSet
-from py3.wedge import TiltInfo, wedge_weights
+from py3sta import average as A
+from py3sta import backend_torch as T
+from py3sta.io.mrc import read_mrc
+from py3sta.io.particles import ParticleSet
+from py3sta.wedge import TiltInfo, wedge_weights
 
 
 def rel(a, b):

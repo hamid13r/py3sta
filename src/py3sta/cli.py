@@ -1,4 +1,4 @@
-"""Command line: ``py3 <command> --help``."""
+"""Command line: ``py3sta <command> --help``."""
 from __future__ import annotations
 
 import glob
@@ -48,7 +48,7 @@ def _write_i3_project(ps: ParticleSet, out_dir, tomo_apix, tomo_file_fmt, tlt_te
 
 @click.group()
 def main():
-    """py3: i3-style subtomogram averaging, RELION 4 / Warp compatible."""
+    """py3sta: i3-style subtomogram averaging, RELION 4 / Warp compatible."""
 
 
 @main.command()
@@ -130,7 +130,7 @@ def star2warp(star, ts_apix, output, suffix):
 @click.option("--halves/--no-halves", default=True, show_default=True, help="Also write half maps + FSC.")
 @click.option("--tilt", "tilt_files", multiple=True, help="Warp .xml or .tlt per tomogram (repeatable) -> wedge-weighted average.")
 @click.option("--wedge-sign", type=click.Choice(["auto", "1", "-1"]), default="auto", show_default=True,
-              help="Tilt-angle sign; auto = -1 for Warp XML with AreAnglesInverted, else +1. Check with 'py3 wedge-check'.")
+              help="Tilt-angle sign; auto = -1 for Warp XML with AreAnglesInverted, else +1. Check with 'py3sta wedge-check'.")
 @click.option("--dose-weight", is_flag=True, help="Weight by per-tilt exposure (Warp XML <Dose>).")
 @click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
 def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
