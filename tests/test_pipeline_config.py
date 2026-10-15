@@ -54,12 +54,17 @@ def test_required_and_types(tmp_path):
 
 def test_value_checks_collect_all_errors():
     p = _project_cfg(box=4)
-    p.ctf.mode = "phaseflip"
+    p.stack.margin = 0
     p.compute.gpu = -1
+    p.particle_radius = 500.0
     with pytest.raises(ConfigError) as e:
         p.validate()
     msg = str(e.value)
-    assert "box: must be >= 8" in msg and "ctf.mode: must be one of" in msg and "compute.gpu" in msg
+    assert "box: must be >= 8" in msg and "stack.margin" in msg and "compute.gpu" in msg and "particle_radius" in msg
+    c = CycleConfig()
+    c.ctf.mode = "phaseflip"
+    with pytest.raises(ConfigError, match="ctf.mode: must be one of"):
+        c.validate()
 
 
 def test_cycle_checks_against_project():
@@ -85,9 +90,18 @@ def test_cycle_checks_against_project():
 def test_ctf_needs_wedge():
     p = _project_cfg()
     p.wedge.use = False
-    p.ctf.mode = "flip"
+    c = CycleConfig.default_for(p)
+    c.ctf.mode = "flip"
+    c.validate()                                # fine on its own
     with pytest.raises(ConfigError, match="needs tilt information"):
-        p.validate()
+        c.validate(p)
+
+
+def test_norm_radius():
+    p = _project_cfg()
+    assert p.norm_radius_vox == 16.0
+    p.particle_radius = 100.0
+    assert p.norm_radius_vox == 10.0
 
 
 # ---------------------------------------------------------------- init
@@ -120,7 +134,8 @@ def test_init_project(tmp_path, monkeypatch):
     assert rep.tilt_ranges["TS_01"] == (-50.0, 40.0)            # AreAnglesInverted -> sign -1
     proj = load_project(tmp_path / "proj")
     cfg = proj.config
-    assert (cfg.box, cfg.apix, cfg.ts_apix, cfg.wedge.use, cfg.ctf.mode) == (16, 10.0, 5.0, True, "none")
+    assert (cfg.box, cfg.apix, cfg.ts_apix, cfg.wedge.use) == (16, 10.0, 5.0, True)
+    assert proj.cycle_config(0).ctf.mode == "none"
     assert proj.cycles == [0] and proj.cycle_config(0).cycle == 0
     b = read_star(proj.input_star)
     assert list(b) == ["optics", "particles"]
@@ -128,9 +143,9 @@ def test_init_project(tmp_path, monkeypatch):
     for col in ("rlnMicrographName", "rlnWarpXMLfile"):
         assert all(os.path.isabs(p) and os.path.isfile(p) for p in df[col])
     assert list(df["rlnAngleRot"]) == [0, 10, 20, 0, 10, 20, 30]  # everything else untouched
-    link = proj.cycle_dir(0) / "00_input.star"
-    assert link.is_symlink() and os.readlink(link) == os.path.join("..", "input.star")
-    assert read_star(link)["particles"].equals(df)
+    assert list(df["rlnTomoParticleName"]) == ["TS_01/1", "TS_01/2", "TS_01/3", "TS_02/1", "TS_02/2", "TS_02/3", "TS_02/4"]
+    cin = proj.cycle_input(0)
+    assert not cin.is_symlink() and read_star(cin)["particles"].equals(df)   # a copy
 
 
 def test_init_refuses_overwrite_and_force(tmp_path):
@@ -150,6 +165,29 @@ def test_init_without_xml(tmp_path):
         init_project(tmp_path / "p2", star, wedge=True)
     with pytest.raises(ConfigError, match="needs tilt information"):
         init_project(tmp_path / "p3", star, ctf_mode="flip")
+
+
+def test_load_cycle_input_checks_edits(tmp_path):
+    from py3sta.pipeline.project import load_cycle_input
+
+    star = _dataset(tmp_path)
+    proj = init_project(tmp_path / "proj", star).project
+    cin = load_cycle_input(proj, 0)
+    assert (len(cin.particles), cin.n_excluded, sorted(cin.tomograms)) == (7, 0, ["TS_01", "TS_02"])
+    b = read_star(proj.cycle_input(0))
+    b["particles"]["py3staExcluded"] = [1, 1, 1, 0, 0, 0, 0]       # all of TS_01 excluded
+    write_star(b, proj.cycle_input(0))
+    cin = load_cycle_input(proj, 0)
+    assert (len(cin.particles), cin.n_excluded, sorted(cin.tomograms)) == (4, 3, ["TS_02"])
+    b["particles"].loc[1, "rlnTomoParticleName"] = "TS_01/1"
+    write_star(b, proj.cycle_input(0))
+    with pytest.raises(ConfigError, match="not unique"):
+        load_cycle_input(proj, 0)
+    b["particles"].loc[1, "rlnTomoParticleName"] = "TS_01/2"
+    b["particles"]["rlnMicrographName"] = "/nonexistent/TS_01.mrc"
+    write_star(b, proj.cycle_input(0))
+    with pytest.raises(FileNotFoundError):
+        load_cycle_input(proj, 0)
 
 
 def test_init_errors(tmp_path):

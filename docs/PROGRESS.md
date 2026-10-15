@@ -7,17 +7,53 @@ Update at the end of every work session: move items, add findings with numbers, 
 **Phase 1 — pipeline skeleton** (see PLAN.md §1–2, §5).
 
 Done:
-1. ✅ `project.yaml` / `cycle.yaml` schema + loader with validation; `py3sta init` (2026-10-14, see below).
+1. ✅ `project.yaml` / `cycle.yaml` schema + loader with validation; `py3sta init` (2026-10-14).
+2. ✅ Manifests + `py3sta status` / `run` / `stack`; project-level unrotated float16 stack with incremental
+   re-crop; `01_average` from the stack with per-tomogram CC; CTF mode in `cycle.yaml`; `00_input.star`
+   is a copy (2026-10-15, see below).
 
-Next concrete tasks (revised 2026-10-15, see PLAN.md §1 for the decisions):
-2. Manifests + `py3sta status` + `py3sta run`; CTF mode moves from `project.yaml` to `cycle.yaml`;
-   `00_input.star` becomes a copy; project-level unrotated stack (create + incremental re-crop);
-   `01_average` from the stack (one interpolation, per-tomogram CC).
+Next concrete tasks:
 3. Reference step (global, file) with masks + band-pass in Å.
 4. Pose composition function + synthetic tests; `_final.star` writer; `py3sta next` (copies 00_input).
 5. Dummy classification from existing `rlnClassNumber` to run select/final end-to-end before the real engines exist.
-6. `py3staExcluded` column: honoured by every step from the start, `py3sta flag`.
+6. `py3sta flag` (the `py3staExcluded` filter itself is already honoured by `load_cycle_input`).
 7. `py3sta set-tomograms` STAR helper (swap reconstructions by `tomo_key()`).
+
+## Phase 1 task 2 — manifests, stack, `01_average` (2026-10-15)
+
+- `stack.py`: `refresh_stack` / `ParticleStack` (`stack/stack.mrcs` float16, `stack.star`). Crops of
+  box + 2·margin on whole voxels around the rounded centre; `max_drift(margin) = margin − 1` voxels per
+  axis keeps the extraction sphere + 1 voxel inside the crop (tested for boxes 16/15/12 at the limit:
+  identical to sampling the tomogram). Re-crop on tomogram path/size/mtime change or drift; new
+  particles appended; rows marked invalid before writing (interrupted refresh is repaired next time).
+  Many particles per tomogram → one sequential z-slab read; ≤ 8 workers.
+- `average.py` / `backend_torch.py`: subvolumes are defined inside the **extraction sphere** (radius
+  box//2 − 1) in both the tomogram and the stack path, so the two agree; **normalisation per particle
+  inside `particle_radius`** (project.yaml, Å, default half the box), separate from step masks.
+  `extract_crop`, `sample_cubes` (torch), `average_particles(..., stack=, per_tomo=)`, `per_tomo_cc`.
+  Torch tomogram path now cuts only box+3 cubes (100 ptcl: 2.5 s → 0.3 s).
+- Per-tomogram check: each tomogram's average vs the others' (leave-one-out, CC inside the particle
+  radius after 40 Å low-pass). CC grows with particle count, so tomograms are compared by the implied
+  per-particle SNR cc²/(n(1−cc²)); flagged if the robust z of log(SNR) < −3. (A plain CC rule flagged
+  5 tomograms on MIM019, incl. ones with 6 and 10 particles; the SNR rule flags 3.)
+- `pipeline/manifest.py`: `run_step` / `check_state` (fingerprints, size/mtime, run ids, edited-output
+  protection with backup, failed / interrupted, input changed during run). `pipeline/steps.py` (step
+  order, params, `01_average`), `pipeline/runner.py` (`run_cycle` with option (a), `refresh_project_stack`,
+  `project_status`). CLI: `run`, `status`, `stack`; `init --particle-radius --margin`; `average --particle-radius`.
+- Tests: 62 pass (`test_stack.py`, `test_pipeline_run.py`, updated `test_pipeline_config.py`).
+
+**MIM019 real data** (`data/mim019_project`, 6081 particles, 34 tomograms, box 72, margin 4, RTX A5000):
+
+| Check | Result |
+|---|---|
+| stack build (34 × 2.9 GB tomograms) | 103 s, 6.2 GB, 7 GB peak RAM |
+| `01_average` from the float16 stack (torch) | 6.4 s (from tomograms: 10.9 s); 6002 used, 79 near edges |
+| stack float16 vs tomogram average (in sphere) | max diff 7.4e-5 of max; float32 stack 7.5e-5 → **float16 adds no error** |
+| FSC 0.143 (unmasked halves) | first crossing 16.3 Å (last 13.3 Å = Nyquist, tail hovers at ~0.14) — same for all three |
+| CC with user's `py3sta_test/average.mrc` (64³ centre, sphere r 31) | **0.9988**, no shift |
+| per-tomogram flags | `2_lam7_ts_007` (z −6.4), `3_lam4_ts_003` (−4.5), `3_lam5_ts_007` (−3.6, 10 ptcl) — worth a look |
+| `00_input.star` edit pointing `2_lam1_ts_002` to another tomogram | status: stale (00_input changed); 196 rows re-cropped (28 s); that tomogram CC 0.95 → 0.03, flagged (z −31) |
+| 10 particles shifted by 6 voxels | status: "10 particle(s) beyond half the drift allowance"; run re-crops exactly 10 (0.2 s) |
 
 ## Done (Phase 0)
 
@@ -56,6 +92,8 @@ Next concrete tasks (revised 2026-10-15, see PLAN.md §1 for the decisions):
 - (2026-10-15) No tomogram sets: tomogram paths live only in the STAR file (edit `00_input.star` to switch
   reconstructions); the CTF mode moves to `cycle.yaml`. `00_input.star` is a copy, not a link.
 - (2026-10-15) Running a step with a stale/missing/failed upstream is refused unless `--force`.
+- (2026-10-15) Normalisation per particle inside `particle_radius` (Å, project.yaml; default half the box),
+  separate from the masks of later steps. Subvolumes are zero outside the extraction sphere (box//2 − 1).
 - (2026-10-15) Stack = raw **unrotated** float16 crops (box + 2·margin, margin 4 voxels), project-level,
   shared by all cycles; the pose is applied by each consumer → one interpolation in the whole pipeline.
   Re-crop only on tomogram change or drift beyond the margin; alignment shift limit ≤ margin.

@@ -44,6 +44,12 @@ class CtfConfig:
 
 
 @dataclass
+class StackSettings:
+    margin: int = 4                             # voxels added on each side of the box (drift allowance)
+    dtype: str = "float16"                      # float16 | float32
+
+
+@dataclass
 class ComputeConfig:
     backend: str = "numpy"                      # numpy | torch
     gpu: typing.Union[int, str] = 0             # GPU index, or "cpu" for torch on CPU
@@ -56,8 +62,9 @@ class ProjectConfig:
     apix: float                                 # Å, tomogram voxel size (MRC header)
     ts_apix: float                              # Å, pixel size of rlnCoordinate* (STAR)
     input_star: str = "input.star"              # relative to the project directory
+    particle_radius: typing.Optional[float] = None  # Å, normalisation sphere; null = half the box
     wedge: WedgeConfig = field(default_factory=WedgeConfig)
-    ctf: CtfConfig = field(default_factory=CtfConfig)
+    stack: StackSettings = field(default_factory=StackSettings)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
     schema: int = SCHEMA
 
@@ -67,12 +74,13 @@ class ProjectConfig:
         err.check(self.box >= 8, "box", f"must be >= 8 voxels (got {self.box})")
         err.check(self.apix > 0, "apix", f"must be > 0 Å (got {self.apix})")
         err.check(self.ts_apix > 0, "ts_apix", f"must be > 0 Å (got {self.ts_apix})")
+        r = self.particle_radius
+        err.check(r is None or 0 < r <= self.box * self.apix / 2, "particle_radius",
+                  f"must be > 0 and <= half the box ({self.box * self.apix / 2:g} Å), or null (got {r})")
         err.choice(self.wedge.sign, WEDGE_SIGNS, "wedge.sign")
-        err.choice(self.ctf.mode, CTF_MODES, "ctf.mode")
-        err.check(self.ctf.mode == "none" or self.wedge.use, "ctf.mode",
-                  f"{self.ctf.mode!r} needs tilt information: set wedge.use: true")
         err.check(self.wedge.use or not self.wedge.dose_weight, "wedge.dose_weight", "needs wedge.use: true")
-        err.check(self.ctf.height_sign in (1, -1), "ctf.height_sign", f"must be 1 or -1 (got {self.ctf.height_sign})")
+        err.check(self.stack.margin >= 1, "stack.margin", f"must be >= 1 voxel (got {self.stack.margin})")
+        err.choice(self.stack.dtype, STACK_DTYPES, "stack.dtype")
         err.choice(self.compute.backend, BACKENDS, "compute.backend")
         g = self.compute.gpu
         err.check(g == "cpu" or (isinstance(g, int) and g >= 0), "compute.gpu",
@@ -84,11 +92,17 @@ class ProjectConfig:
     def box_angst(self) -> float:
         return self.box * self.apix
 
+    @property
+    def norm_radius_vox(self) -> float:
+        """Normalisation radius in voxels (particle_radius, default half the box)."""
+        return (self.particle_radius or self.box_angst / 2) / self.apix
+
 
 @dataclass
 class AverageConfig:
     halves: bool = True
     normalize: bool = True
+    cc_lowpass: float = 40.0                    # Å, low-pass for the per-tomogram CC check
 
 
 @dataclass
@@ -110,17 +124,11 @@ class ReferenceConfig:
 
 
 @dataclass
-class StackConfig:
-    dtype: str = "float16"                      # float16 | float32
-    msa_box: typing.Optional[int] = None        # smaller box for MSA (i3 MSAIMGSIZE), null = same
-
-
-@dataclass
 class CycleConfig:
     cycle: int = 0
+    ctf: CtfConfig = field(default_factory=CtfConfig)  # belongs to the tomograms in 00_input.star
     average: AverageConfig = field(default_factory=AverageConfig)
     reference: ReferenceConfig = field(default_factory=ReferenceConfig)
-    stack: StackConfig = field(default_factory=StackConfig)
     schema: int = SCHEMA
 
     def validate(self, project: ProjectConfig | None = None, where: str = "cycle.yaml") -> None:
@@ -128,6 +136,11 @@ class CycleConfig:
         err = _Errors(where)
         err.check(self.schema == SCHEMA, "schema", f"unsupported schema {self.schema} (this py3sta reads {SCHEMA})")
         err.check(self.cycle >= 0, "cycle", f"must be >= 0 (got {self.cycle})")
+        err.choice(self.ctf.mode, CTF_MODES, "ctf.mode")
+        err.check(self.ctf.height_sign in (1, -1), "ctf.height_sign", f"must be 1 or -1 (got {self.ctf.height_sign})")
+        if project is not None:
+            err.check(self.ctf.mode == "none" or project.wedge.use, "ctf.mode",
+                      f"{self.ctf.mode!r} needs tilt information: set wedge.use: true in project.yaml")
         r = self.reference
         err.choice(r.mode, REFERENCE_MODES, "reference.mode")
         err.check(r.mode != "file" or r.files, "reference.files", "mode 'file' needs at least one MRC file")
@@ -156,11 +169,6 @@ class CycleConfig:
             if r.lowpass:
                 err.check(r.lowpass >= 2 * project.apix, "reference.lowpass",
                           f"{r.lowpass:g} Å is beyond Nyquist ({2 * project.apix:g} Å)")
-        err.choice(self.stack.dtype, STACK_DTYPES, "stack.dtype")
-        b = self.stack.msa_box
-        if b is not None:
-            err.check(b >= 8 and (project is None or b <= project.box), "stack.msa_box",
-                      f"must be between 8 and the box size (got {b})")
         err.raise_if_any()
 
     @classmethod
@@ -182,14 +190,16 @@ def _round(v: float) -> float:
 PROJECT_HEADER = """\
 # py3sta project configuration
 # box: voxels at the tomogram pixel size; apix / ts_apix: Å (tomogram voxel / STAR coordinates)
-# wedge.sign: auto | 1 | -1;  ctf.mode: none | flip | wiener | amplitude (decide with 'py3sta ctf-check')
+# particle_radius: Å, sphere for per-particle normalisation (null = half the box)
+# wedge.sign: auto | 1 | -1;  stack.margin: voxels per side (drift allowance);  stack.dtype: float16 | float32
 # compute.backend: numpy | torch;  compute.gpu: index or 'cpu';  compute.jobs: 0 = all cores
 """
 
 CYCLE_HEADER = """\
 # py3sta cycle configuration (copied to the next cycle by 'py3sta next', then edit)
+# ctf.mode: none | flip | wiener | amplitude -- belongs to the tomograms in 00_input.star ('py3sta ctf-check')
 # All sizes in Å.  reference.mode: global | file | classes;  mask.shape: sphere | ellipsoid | box | file
-# mask.radius: 1 value (sphere) or 3 (ellipsoid / box half-sizes);  stack.dtype: float16 | float32
+# mask.radius: 1 value (sphere) or 3 (ellipsoid / box half-sizes)
 """
 
 

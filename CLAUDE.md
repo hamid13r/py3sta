@@ -17,10 +17,12 @@ src/py3sta/
   wedge.py           TiltInfo (Warp XML / .tlt), missing wedge, dose, CTF (CTFParams, particle_defocus, ctf_transfer)
   average.py         extract (trilinear), average_particles (multiprocess, wedge/dose/CTF Wiener), fsc, path resolution
   backend_torch.py   PyTorch/CUDA mirror of extract/wedge/average (must stay numerically equal to numpy)
-  cli.py             click CLI: init pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
+  stack.py           project particle stack: unrotated float16 crops, refresh_stack (new / tomogram changed / drift)
+  cli.py             click CLI: init run status stack pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
   io/                star.py (dependency-free STAR), mrc.py (numpy MRC), trf.py (i3), dipole.py (.pos picks),
                      particles.py (ParticleSet = RELION-4 particle table + tomo_key naming)
-  pipeline/          config.py (project.yaml / cycle.yaml schema + validation), project.py (init, load, cycles)
+  pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks), manifest.py (run_step,
+                     change tracking, states), steps.py (step order + 01_average), runner.py (run_cycle, status)
   utils/             stand-alone utilities (each also `python -m py3sta.utils.<name>`), e.g. add_warp_xml
 tests/               pytest; scipy/torch tests auto-skip when not installed
 scripts/check_torch.py   GPU vs numpy parity + timing on real data
@@ -57,6 +59,8 @@ python scripts/check_torch.py STAR TOMO --tilt XML --gpu 0
   at low frequency. Modes: `flip`/`wiener` for uncorrected WBP (IMOD/etomo), `none`/`amplitude` for
   already phase-flipped tomograms (Warp, novaCTF). Decide with `py3sta ctf-check` — **half-map FSC cannot**.
 - **Averaging:** Fourier Wiener `Σ w·F / max(Σ w², eps·n)`; half sets from `rlnRandomSubset`, else alternate rows.
+  Subvolumes are zero outside the extraction sphere (radius box//2 − 1) and normalised per particle inside
+  `particle_radius`. The stack (`stack/`) holds unrotated crops; poses are applied on use (one interpolation).
 - **Parallel CPU:** `average_particles(jobs=N)` uses processes; avoid BLAS calls in workers (oversubscription
   made -j4 slower than -j1 once — use element-wise math).
 - **Units:** Å for physical sizes in user-facing options; voxels internally; angles in degrees.

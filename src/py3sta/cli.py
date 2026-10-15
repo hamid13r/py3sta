@@ -63,14 +63,17 @@ def main():
 @click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
 @click.option("--gpu", default="0", show_default=True, help="GPU index, or 'cpu' (torch backend).")
 @click.option("-j", "--jobs", type=int, default=0, show_default=True, help="CPU worker processes (0 = all cores).")
-@click.option("--force", is_flag=True, help="Overwrite project.yaml, input.star and cycle-000/cycle.yaml.")
-def init(project_dir, star, box, ctf_mode, wedge, backend, gpu, jobs, force):
+@click.option("--particle-radius", type=float, help="Radius (Å) of the per-particle normalisation sphere. Default: half the box.")
+@click.option("--margin", type=int, default=4, show_default=True, help="Stack crop margin (voxels per side; drift allowance).")
+@click.option("--force", is_flag=True, help="Overwrite project.yaml, input.star and cycle-000/{cycle.yaml,00_input.star}.")
+def init(project_dir, star, box, ctf_mode, wedge, backend, gpu, jobs, particle_radius, margin, force):
     """Create a project folder (project.yaml, input.star, cycle-000/) from a particle STAR file."""
     from .pipeline import ConfigError, init_project
 
     try:
         rep = init_project(project_dir, star, box=box, ctf_mode=ctf_mode, wedge=wedge, backend=backend,
-                           gpu=int(gpu) if gpu.isdigit() else gpu, jobs=jobs, force=force)
+                           gpu=int(gpu) if gpu.isdigit() else gpu, jobs=jobs, force=force,
+                           particle_radius=particle_radius, margin=margin)
     except (ConfigError, ValueError, FileNotFoundError, NotImplementedError) as e:
         raise click.ClickException(str(e))
     cfg = rep.project.config
@@ -79,10 +82,101 @@ def init(project_dir, star, box, ctf_mode, wedge, backend, gpu, jobs, force):
         rng = rep.tilt_ranges.get(t)
         click.echo(f"  {t:40s} {n:6d}" + (f"   tilts {rng[0]:.1f}..{rng[1]:.1f} deg" if rng else ""))
     click.echo(f"box {cfg.box} voxels at {cfg.apix:g} Å ({cfg.box_angst:g} Å); coordinates at {cfg.ts_apix:g} Å; "
-               f"wedge {'on' if cfg.wedge.use else 'off'}; ctf {cfg.ctf.mode}; {cfg.compute.backend} backend")
+               f"normalisation radius {cfg.norm_radius_vox * cfg.apix:g} Å; wedge {'on' if cfg.wedge.use else 'off'}; "
+               f"ctf {ctf_mode}; {cfg.compute.backend} backend")
     for w in rep.warnings:
         click.echo(f"warning: {w}")
-    click.echo(f"project written to {rep.project.root} (edit cycle-000/cycle.yaml, then run cycle-000)")
+    click.echo(f"project written to {rep.project.root} (edit cycle-000/cycle.yaml, then 'py3sta run {project_dir} 0')")
+
+
+def _cycle_number(cycle) -> int:
+    import re
+
+    m = re.fullmatch(r"(?:cycle-)?(\d+)", str(cycle).rstrip("/").split("/")[-1])
+    if not m:
+        raise click.BadParameter(f"{cycle!r}: give a cycle number or folder name (0, cycle-000)")
+    return int(m.group(1))
+
+
+@main.command()
+@click.argument("project_dir")
+@click.argument("cycle")
+@click.option("--from", "start", help="First step (default: the first one).")
+@click.option("--to", "stop", help="Last step (default: the last implemented one).")
+@click.option("--force", is_flag=True, help="Run even if an upstream step is stale; re-run over hand-edited STAR outputs (backups kept).")
+def run(project_dir, cycle, start, stop, force):
+    """Run the steps of a cycle (refreshes the particle stack first). CYCLE: 0 or cycle-000."""
+    from .pipeline import ConfigError, load_project
+    from .pipeline.manifest import StepError
+    from .pipeline.runner import run_cycle
+
+    try:
+        run_cycle(load_project(project_dir), _cycle_number(cycle), start, stop, force, log=click.echo)
+    except (ConfigError, StepError, KeyError, ValueError, FileNotFoundError, RuntimeError) as e:
+        raise click.ClickException(str(e))
+
+
+@main.command()
+@click.argument("project_dir")
+def stack(project_dir):
+    """Create or update the particle stack for the latest cycle (normally done by 'run')."""
+    from .pipeline import ConfigError, load_project
+    from .pipeline.runner import refresh_project_stack
+    from .stack import StackError
+
+    proj = load_project(project_dir)
+    if not proj.cycles:
+        raise click.ClickException("no cycle folder")
+    try:
+        refresh_project_stack(proj, proj.cycles[-1], log=click.echo)
+    except (ConfigError, StackError, FileNotFoundError) as e:
+        raise click.ClickException(str(e))
+
+
+@main.command()
+@click.argument("project_dir", default=".")
+def status(project_dir):
+    """Show the state of every cycle and step (done / stale / missing / running / failed / edited)."""
+    from .pipeline import ConfigError, load_project
+    from .pipeline.runner import project_status
+
+    try:
+        proj = load_project(project_dir)
+    except ConfigError as e:
+        raise click.ClickException(str(e))
+    st = project_status(proj)
+    if st.stack_rows:
+        line = f"stack: {st.stack_rows} particles, {st.stack_bytes / 1e9:.1f} GB"
+        r = st.stack_report
+        if r:
+            line += (f"; last refresh {r['time']} (cycle {r['cycle']}): {r['n_new']} new, "
+                     f"{r['n_tomogram']} tomogram changed, {r['n_drift']} drift")
+        if st.drift_warning:
+            line += f"; {st.drift_warning} particle(s) beyond half the drift allowance"
+        click.echo(line)
+    else:
+        click.echo("stack: not built yet")
+    for cs in st.cycles:
+        head = f"cycle-{cs.n:03d}"
+        if cs.error:
+            click.echo(f"{head}  input problem: {cs.error}")
+        else:
+            click.echo(f"{head}  {cs.n_particles} particles ({cs.n_excluded} excluded), ctf {cs.ctf_mode}")
+        for s, state in cs.steps:
+            if state.state == "not implemented":
+                continue
+            m, extra = state.manifest, ""
+            if m and m.get("status") == "done":
+                i = m.get("info", {})
+                extra = f"  {m['finished']}  {m['seconds']:.0f} s  {m.get('device') or ''}"
+                if "fsc143_last" in i:
+                    extra += f"  FSC0.143 {i['fsc143_last']} Å"
+                if i.get("low_cc_tomograms"):
+                    extra += f"  low CC: {', '.join(i['low_cc_tomograms'])}"
+            click.echo(f"  {s.folder:14s} {state.describe()}{extra}")
+        pending = [s.folder for s, state in cs.steps if state.state == "not implemented"]
+        if pending:
+            click.echo(f"  (not implemented yet: {', '.join(pending)})")
 
 
 @main.command()
@@ -173,12 +267,13 @@ def star2warp(star, ts_apix, output, suffix):
                    "amplitude: already phase-flipped tomograms (Warp, novaCTF). Check with 'py3sta ctf-check'.")
 @click.option("--ctf-height-sign", type=float, default=1.0, show_default=True,
               help="Direction of the per-particle defocus offset with height (1, -1, or 0 to ignore height).")
+@click.option("--particle-radius", type=float, help="Radius (Å) of the per-particle normalisation sphere. Default: half the box.")
 @click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
 @click.option("-j", "--jobs", type=int, default=0, help="CPU worker processes for the numpy backend (0 = all cores).")
 @click.option("--gpu", default="0", show_default=True,
               help="GPU for --backend torch: index (0, 1, ...) or 'cpu'. Indices follow CUDA_VISIBLE_DEVICES.")
 def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
-            dose_weight, backend, jobs, gpu, no_wedge, ctf_mode, ctf_height_sign):
+            dose_weight, particle_radius, backend, jobs, gpu, no_wedge, ctf_mode, ctf_height_sign):
     """Extract particles from tomograms and write the global average.
 
     Tomograms are read from the STAR file's rlnMicrographName (paths as written,
@@ -224,8 +319,13 @@ def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halv
         if no_ctf:
             raise click.ClickException(f"--ctf: no CTF information for {no_ctf} (need Warp XML, not .tlt)")
         click.echo(f"CTF correction: {ctf_mode} (height sign {ctf_height_sign:+g})")
+    from .io.mrc import read_header
+
+    norm_radius = None
+    if particle_radius:
+        norm_radius = particle_radius / read_header(next(iter(tomo_map.values())))["apix"]
     kw = dict(rotate=not no_rotate, normalize=not no_normalize, progress=prog, tilts=tilts, dose_weight=dose_weight,
-              ctf_mode=ctf_mode, height_sign=ctf_height_sign)
+              ctf_mode=ctf_mode, height_sign=ctf_height_sign, norm_radius=norm_radius)
     if backend == "torch":
         import torch
 

@@ -18,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .average import AverageResult, half_sets
+from .average import AverageResult, extraction_sphere, half_sets, sphere_mask
 from .io.mrc import read_mrc
 from .wedge import TiltInfo, electron_wavelength, particle_defocus
 
@@ -50,28 +50,41 @@ def crop_batch(vol, centres: np.ndarray, size: int):
     return out, lo
 
 
-def extract_batch(vol, centres: np.ndarray, mats: np.ndarray, box: int, device, grid=None):
-    """Batched reference-frame extraction. Returns sub (B,box,box,box), inside (B,box,box,box) on device."""
-    size = int(math.ceil(box * math.sqrt(3))) + 3
+def extract_batch(vol, centres: np.ndarray, mats: np.ndarray, box: int, device, grid=None, full_box=True):
+    """Batched reference-frame extraction. Returns sub (B,box,box,box), inside (B,box,box,box) on device.
+
+    full_box=False cuts only the cube needed for the extraction sphere (faster; corners then read 0).
+    """
+    size = int(math.ceil(box * math.sqrt(3))) + 3 if full_box else box + 3
     cubes, lo = crop_batch(vol, centres, size)
+    return sample_cubes(cubes, lo, vol.shape, centres, mats, box, device, grid)
+
+
+def sample_cubes(cubes, lo, tomo_shape, centres, mats, box: int, device, grid=None):
+    """Sample (B, S, S, S) cubes whose first voxels are tomogram voxels ``lo`` (B,3 xyz); mirrors
+    average.extract / extract_crop. Points outside a cube or outside the tomogram get weight 0."""
     grid = box_grid_t(box, device) if grid is None else grid
+    size = cubes.shape[-1]
     M = torch.as_tensor(np.asarray(mats, np.float32), device=device)            # (B,3,3)
     c = torch.as_tensor(np.asarray(centres, np.float32), device=device)          # (B,3)
     pts = torch.einsum("zyxi,bij->bzyxj", grid, M) + c[:, None, None, None, :]   # r @ M + c  (tomo voxels)
-    shape = torch.as_tensor(vol.shape[::-1], dtype=torch.float32, device=device)
+    shape = torch.as_tensor(tomo_shape[::-1], dtype=torch.float32, device=device)
     p0 = torch.floor(pts)
-    inside = ((p0 >= 0) & (p0 + 1 < shape)).all(-1).float()
-    local = pts - torch.as_tensor(lo, dtype=torch.float32, device=device)[:, None, None, None, :]
+    local = pts - torch.as_tensor(np.asarray(lo, np.float32), device=device)[:, None, None, None, :]
+    l0 = torch.floor(local)
+    inside = (((p0 >= 0) & (p0 + 1 < shape)).all(-1) & ((l0 >= 0) & (l0 + 1 < size)).all(-1)).float()
     norm = local * (2.0 / (size - 1)) - 1.0                                      # align_corners=True
-    inp = torch.as_tensor(cubes, device=device)[:, None]
+    inp = torch.as_tensor(cubes, device=device).float()[:, None]
     sub = F.grid_sample(inp, norm, mode="bilinear", padding_mode="zeros", align_corners=True)[:, 0]
     return sub * inside, inside
 
 
-def normalize_batch(sub, inside):
-    n = inside.sum((1, 2, 3)).clamp_min(1)
-    mean = (sub * inside).sum((1, 2, 3)) / n
-    var = (((sub - mean[:, None, None, None]) * inside) ** 2).sum((1, 2, 3)) / n
+def normalize_batch(sub, inside, norm_mask=None):
+    """mean 0 / std 1 over inside * norm_mask voxels; applied to all inside voxels (= average.prepare_subvolume)."""
+    m = inside if norm_mask is None else inside * norm_mask
+    n = m.sum((1, 2, 3)).clamp_min(1)
+    mean = (sub * m).sum((1, 2, 3)) / n
+    var = (((sub - mean[:, None, None, None]) * m) ** 2).sum((1, 2, 3)) / n
     std = var.sqrt()
     std = torch.where(std > 0, std, torch.ones_like(std))
     return (sub - mean[:, None, None, None]) / std[:, None, None, None] * inside
@@ -149,47 +162,64 @@ def wedge_weights_batch(box, tilt: TiltInfo, mats, apix=None, dose_weight=False,
 
 # ------------------------------------------------------------------- average
 @torch.no_grad()
-def average_particles_torch(ps, tomograms: dict, box: int, rotate: bool = True, normalize: bool = True,
+def average_particles_torch(ps, tomograms: dict | None, box: int, rotate: bool = True, normalize: bool = True,
                             min_inside: float = 0.9, progress=None, tilts: dict | None = None,
                             dose_weight: bool = False, wiener_eps: float = 0.05,
                             device=None, batch: int = 32, ctf_mode: str | None = None,
-                            height_sign: float = 1.0, jobs=None) -> AverageResult:
-    """Same semantics as average.average_particles, on the GPU."""
+                            height_sign: float = 1.0, jobs=None, norm_radius: float | None = None,
+                            stack=None, per_tomo: bool = False) -> AverageResult:
+    """Same semantics as average.average_particles, on the GPU (also from a ``stack``)."""
     device = torch.device(device) if device is not None else default_device()
     grid = box_grid_t(box, device)
     kgrid = rfft_grid_t(box, device) if tilts is not None else None
-    fshape = (box, box, box // 2 + 1)
-    if tilts is not None:
-        acc = {h: torch.zeros(fshape, dtype=torch.complex128, device=device) for h in (1, 2)}
-        wacc = {h: torch.zeros(fshape, dtype=torch.float64, device=device) for h in (1, 2)}
-    else:
-        acc = {h: torch.zeros((box,) * 3, dtype=torch.float64, device=device) for h in (1, 2)}
-        wacc = {h: torch.zeros((box,) * 3, dtype=torch.float64, device=device) for h in (1, 2)}
+    sphere = torch.as_tensor(extraction_sphere(box), device=device)
+    nmask = sphere if norm_radius is None else torch.as_tensor(sphere_mask(box, norm_radius), device=device)
+    n_sphere = float(sphere.sum())
+    fshape = (box, box, box // 2 + 1) if tilts is not None else (box,) * 3
+    ctype = torch.complex128 if tilts is not None else torch.float64
+    acc = {h: torch.zeros(fshape, dtype=ctype, device=device) for h in (1, 2)}
+    wacc = {h: torch.zeros(fshape, dtype=torch.float64, device=device) for h in (1, 2)}
     nh = {1: 0, 2: 0}
+    by_tomo = {} if per_tomo else None
     halves_all = half_sets(ps)
     mats_all = ps.matrices if rotate else np.broadcast_to(np.eye(3), (len(ps), 3, 3))
+    loc = stack.locate(ps) if stack is not None else None
+    data = stack.data("r") if stack is not None else None
     used = skipped = 0
     apix_out = None
     for tomo, idx in ps.df.groupby("rlnTomoName", sort=False).groups.items():
-        if tomo not in tomograms:
-            raise KeyError(f"no tomogram given for rlnTomoName={tomo!r}")
-        vol, apix = read_mrc(tomograms[tomo])
+        if loc is None:
+            if tomo not in tomograms:
+                raise KeyError(f"no tomogram given for rlnTomoName={tomo!r}")
+            vol, apix = read_mrc(tomograms[tomo])
+            tshape = vol.shape
+        else:
+            apix, tshape = stack.apix, loc.tomo_shape[tomo]
         apix_out = apix_out or apix
         idx = np.asarray(idx)
         centres = ps.centers_px[idx] * (ps.ts_apix / apix)
-        tomo_centre = (np.array(vol.shape[::-1], float) - 1) / 2
+        tomo_centre = (np.array(tshape[::-1], float) - 1) / 2
+        t_acc = torch.zeros(fshape, dtype=ctype, device=device) if per_tomo else None
+        t_w = torch.zeros(fshape, dtype=torch.float64, device=device) if per_tomo else None
+        t_n = 0
         for s in range(0, len(idx), batch):
             bi = idx[s:s + batch]
-            sub, ins = extract_batch(vol, centres[s:s + batch], mats_all[bi], box, device, grid)
-            ok = (ins.mean((1, 2, 3)) >= min_inside).cpu().numpy()
+            cb = centres[s:s + batch]
+            if loc is None:
+                sub, ins = extract_batch(vol, cb, mats_all[bi], box, device, grid, full_box=False)
+            else:
+                cubes = np.asarray(data[np.sort(loc.rows[bi])])[np.argsort(np.argsort(loc.rows[bi]))]
+                sub, ins = sample_cubes(cubes, loc.lo[bi], tshape, cb, mats_all[bi], box, device, grid)
+            ins = ins * sphere
+            sub = sub * sphere
+            ok = (ins.sum((1, 2, 3)) / n_sphere >= min_inside).cpu().numpy()
             skipped += int((~ok).sum())
             if not ok.any():
                 continue
             sel = torch.as_tensor(np.nonzero(ok)[0], device=device)
-            cen = centres[s:s + batch][ok]
+            cen = cb[ok]
             sub, ins, bi = sub[sel], ins[sel], bi[ok]
-            if normalize:
-                sub = normalize_batch(sub, ins)
+            sub = normalize_batch(sub, ins, nmask) if normalize else sub * ins
             used += len(bi)
             halves = torch.as_tensor(halves_all[bi], device=device)
             if tilts is not None:
@@ -197,21 +227,24 @@ def average_particles_torch(ps, tomograms: dict, box: int, rotate: bool = True, 
                        if ctf_mode else None)
                 w = wedge_weights_batch(box, tilts[tomo], mats_all[bi], apix, dose_weight, grid=kgrid,
                                         defocus_A=dfc, ctf_mode=ctf_mode)
-                Fs = torch.fft.rfftn(sub, dim=(1, 2, 3)) * w
-                w2 = w * w
+                vals, wts = torch.fft.rfftn(sub, dim=(1, 2, 3)) * w, w * w
+            else:
+                vals, wts = sub, ins
             for h in (1, 2):
                 m = halves == h
                 if not m.any():
                     continue
                 nh[h] += int(m.sum())
-                if tilts is not None:
-                    acc[h] += Fs[m].sum(0).to(torch.complex128)
-                    wacc[h] += w2[m].sum(0).double()
-                else:
-                    acc[h] += sub[m].sum(0).double()
-                    wacc[h] += ins[m].sum(0).double()
+                acc[h] += vals[m].sum(0).to(ctype)
+                wacc[h] += wts[m].sum(0).double()
+            if per_tomo:
+                t_acc += vals.sum(0).to(ctype)
+                t_w += wts.sum(0).double()
+                t_n += len(bi)
             if progress:
                 progress(used + skipped, len(ps))
+        if per_tomo:
+            by_tomo[tomo] = (t_acc.cpu().numpy(), t_w.cpu().numpy(), t_n)
 
     if tilts is not None:
         def fin(Fa, Wa, n):
@@ -221,4 +254,4 @@ def average_particles_torch(ps, tomograms: dict, box: int, rotate: bool = True, 
             return (Sa / Wa.clamp_min(1e-6)).float().cpu().numpy()
     avg = fin(acc[1] + acc[2], wacc[1] + wacc[2], used)
     halves = (fin(acc[1], wacc[1], nh[1]), fin(acc[2], wacc[2], nh[2]))
-    return AverageResult(avg, halves, used, skipped, apix_out)
+    return AverageResult(avg, halves, used, skipped, apix_out, by_tomo, tilts is not None, wiener_eps)

@@ -36,28 +36,58 @@ def read_mrc(path, mmap: bool = True):
     return a, h["apix"]
 
 
-def write_mrc(path, data, apix: float = 1.0, origin=(0.0, 0.0, 0.0)) -> None:
-    data = np.ascontiguousarray(data)
-    if data.dtype not in _MODE_OF:
-        data = data.astype(np.float32)
-    nz, ny, nx = data.shape
+def header_bytes(shape, dtype, apix: float = 1.0, origin=(0.0, 0.0, 0.0), stats=(0.0, 0.0, 0.0, 0.0)) -> bytes:
+    """1024-byte MRC2014 header for an array of ``shape`` [z, y, x]; stats = (min, max, mean, rms)."""
+    nz, ny, nx = shape
     hi = np.zeros(256, "<i4")
     hf = hi.view("<f4")
-    hi[:4] = (nx, ny, nz, _MODE_OF[data.dtype])
+    hi[:4] = (nx, ny, nz, _MODE_OF[np.dtype(dtype)])
     hi[7:10] = (nx, ny, nz)
     hf[10:13] = (nx * apix, ny * apix, nz * apix)
     hf[13:16] = 90.0
     hi[16:19] = (1, 2, 3)
-    d = data.astype(np.float64)
-    hf[19:22] = (d.min(), d.max(), d.mean())
+    hf[19:22] = stats[:3]
     hf[49:52] = origin
+    hi[27] = 20140  # nversion
+    hf[54] = stats[3]
     hb = bytearray(hi.tobytes())
     hb[208:212] = b"MAP "
     hb[212:216] = bytes([0x44, 0x44, 0, 0])  # little-endian machine stamp
-    hi2 = np.frombuffer(bytes(hb), "<i4").copy()
-    hi2[27] = 20140  # nversion
-    hf2 = hi2.view("<f4")
-    hf2[54] = d.std()  # rms
+    return bytes(hb)
+
+
+def write_mrc(path, data, apix: float = 1.0, origin=(0.0, 0.0, 0.0)) -> None:
+    data = np.ascontiguousarray(data)
+    if data.dtype not in _MODE_OF:
+        data = data.astype(np.float32)
+    d = data.astype(np.float64)
     with open(path, "wb") as f:
-        f.write(hi2.tobytes())
+        f.write(header_bytes(data.shape, data.dtype, apix, origin, (d.min(), d.max(), d.mean(), d.std())))
         f.write(data.tobytes())
+
+
+def open_volume_stack(path, n: int, size: int, dtype=np.float16, apix: float = 1.0, mode: str = "r+"):
+    """Stack of n cubes (size^3) stored as one MRC of shape (n*size, size, size); returns memmap (n, size, size, size).
+
+    mode "w+" creates (or truncates) the file; "r+" / "r" open an existing one. ``resize_volume_stack`` grows it.
+    """
+    dtype = np.dtype(dtype)
+    if mode == "w+":
+        with open(path, "wb") as f:
+            f.write(header_bytes((n * size, size, size), dtype, apix))
+            f.truncate(1024 + n * size ** 3 * dtype.itemsize)
+    h = read_header(path)
+    nz, ny, nx = h["shape"]
+    if ny != size or nx != size or nz % size:
+        raise ValueError(f"{path}: shape {h['shape']} is not a stack of {size}^3 cubes")
+    return np.memmap(path, dtype=h["dtype"], mode="r" if mode == "r" else "r+", offset=h["offset"],
+                     shape=(nz // size, size, size, size))
+
+
+def resize_volume_stack(path, n: int, size: int) -> None:
+    """Grow (or shrink) a volume stack to n cubes in place; new cubes are zero."""
+    h = read_header(path)
+    dtype = np.dtype(h["dtype"])
+    with open(path, "r+b") as f:
+        f.write(header_bytes((n * size, size, size), dtype, h["apix"]))
+        f.truncate(1024 + n * size ** 3 * dtype.itemsize)
