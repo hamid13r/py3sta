@@ -67,10 +67,21 @@ project/
    - per class: `align` | `leave` | `exclude`,
    - targets: aligned classes **to each other** (exhaustive search among them, then refine against their
      running average) or **to a reference MRC**; targets can be mixed per class group,
-   - class transforms are composed onto every member's pose; `leave` keeps poses; `exclude` handling: see open questions.
+   - class transforms are composed onto every member's pose; `leave` keeps poses;
+   - `exclude` sets `py3staExcluded = 1` on the members (see "Excluded particles" below).
 9. **Final** — `cycle-NNN_final.star`: new angles/origins (RELION 4), `rlnClassNumber`, `py3staCycle`,
    scores; summary report.
 10. **Next** — `py3sta next` creates `cycle-NNN+1/`, copies `cycle.yaml`, links `00_input.star`.
+
+### Excluded particles
+
+- Excluded particles stay in every STAR file with `py3staExcluded = 1` (plus `py3staExcludedCycle`, the
+  cycle where it was set) and are carried over to all later cycles.
+- Every step (average, reference, stack, align, MSA, classify, explore, select) skips rows with
+  `py3staExcluded = 1`; they keep their last pose untouched.
+- They stay excluded until the user changes the flag back: `py3sta flag cycle-003 --include <selection>`
+  (selection by class of a given cycle, lasso group, particle names, or a STAR file), or by editing the column.
+- `py3sta flag` also supports `--exclude` for manual exclusion; `status` reports active / excluded counts.
 
 ### CLI sketch
 
@@ -80,6 +91,7 @@ py3sta run     cycle-000 [--from stack] [--to classify]
 py3sta explore cycle-000                      # UMAP / PCA scatter, lasso groups
 py3sta select  cycle-000 --use kmeans:6 --align 1,2,4 --leave 3 --exclude 5 --target each   # or --target ref.mrc
 py3sta select  cycle-000 --use lasso --align all --target each
+py3sta flag    cycle-003 --include class:cycle-001:5     # revive previously excluded particles
 py3sta next    cycle-000
 py3sta status
 ```
@@ -104,12 +116,11 @@ py3sta status
 | 2 | Alignment engine (CPU + GPU), MRA step | MIM019 angles perturbed ±15° recovered (median < 5°), FSC not worse; 265 ptcl × 2000 orientations < 1 min on GPU |
 | 3 | PCA (wedge-masked differences + plain), k-means, Ward, GMM, multi-K outputs | synthetic 2-state data separated; wedge factors absent |
 | 4 | UMAP + `explore` (static HTML lasso → groups.json → class_lasso.star) | groups round-trip into `select`; lasso on synthetic data reproduces true classes |
-| 5 | `select`: each/reference targets, leave/exclude, class-average alignment, propagate to members, full cycle | one full cycle on MIM019; next-cycle average ≥ previous (FSC, CC vs template) |
+| 5 | `select`: each/reference targets, leave/exclude (flag carried over), `flag --include/--exclude`, class-average alignment, propagate to members, full cycle | one full cycle on MIM019; next-cycle average ≥ previous (FSC, CC vs template) |
 | 6 | Reports (HTML per cycle), ChimeraX push, live explorer server (v2) | — |
 | 7 | CTF in alignment/MSA scores, multi-tomogram datasets (height sign), novaCTF comparison | — |
 
 ## 5. Open questions (ask the user)
 
-- `exclude`: drop particles from the next cycle entirely, or keep them flagged (`py3staExcluded`) so they can be revived?
 - Stack precision default (float16 vs float32) once real dataset sizes are known.
 - Reference for class-average alignment when `each`: best-SNR class vs running average (default: running average).

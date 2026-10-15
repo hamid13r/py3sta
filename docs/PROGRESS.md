@@ -13,6 +13,7 @@ Next concrete tasks:
 4. Stack step: pre-rotated `stack.mrcs` (float16) + `stack.star`, CPU multiprocess + torch.
 5. Pose composition function + synthetic tests; `_final.star` writer; `py3sta next`.
 6. Dummy classification from existing `rlnClassNumber` to run select/final end-to-end before the real engines exist.
+7. `py3staExcluded` column: honoured by every step from the start (average already needs a filter), `py3sta flag`.
 
 ## Done (Phase 0)
 
@@ -24,7 +25,7 @@ Next concrete tasks:
 | Extraction | trilinear (flat `take`, ~4.5x faster than fancy indexing), memmapped crops | `average.py` |
 | Averaging | real-space and Fourier Wiener; half maps; FSC (first/last crossing) | `average.py` |
 | Parallel | `-j N` worker processes; 263 ptcl: 24 s → 5.5 s on 4 cores | `average.py` |
-| GPU | torch mirror of extraction/wedge/dose/CTF/average, `--backend torch --gpu N` — **not yet run on a GPU** | `backend_torch.py`, `scripts/check_torch.py` |
+| GPU | torch mirror of extraction/wedge/dose/CTF/average, `--backend torch --gpu N` — **runs on the user's GPU (CUDA 12.2)** | `backend_torch.py`, `scripts/check_torch.py` |
 | Wedge | Warp XML / .tlt; sign measured from data (`wedge-check`) | `wedge.py` |
 | Dose | Grant & Grigorieff exposure filter per nearest tilt | `wedge.py` |
 | CTF | per-tilt GridCTF defocus + particle height; flip / wiener / amplitude; `ctf-check` | `wedge.py`, `cli.py` |
@@ -50,8 +51,10 @@ Next concrete tasks:
 - RELION 4 particle format; Warp export via minimal STAR (`star2warp`).
 - Tomogram path in `rlnMicrographName`, Warp XML in `rlnWarpXMLfile`; no `--tomo-dir`.
 - User wants PCA, k-means and UMAP, with lasso drawing on the UMAP plot to define particle groups (Phase 3–4).
+- Excluded particles are **kept** in the STAR file with `py3staExcluded = 1`, carried over to all later
+  cycles and skipped by every step, until the user flips the flag back (`py3sta flag --include`). (PLAN.md §2)
+- GPU backend confirmed working by the user with `py3sta average --backend torch` (CUDA 12.2).
 
 ## Open questions
 
-- Excluded classes: drop or keep flagged? (PLAN.md §5)
-- GPU parity run (`scripts/check_torch.py`) on the user's CUDA 12.2 machine — pending.
+- Numerical parity numbers from `scripts/check_torch.py` on the GPU not yet recorded (backend runs; record diffs + timing).
