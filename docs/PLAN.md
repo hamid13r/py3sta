@@ -107,7 +107,59 @@ py3sta status
   tested with synthetic known transforms (both for MRA and class-average propagation).
 - **Masks/filters**: sphere, ellipsoid, box, cylinder, file; soft edges; band-pass in Å.
 
-## 4. Phases and acceptance checks
+## 4. Dashboard (GUI)
+
+A browser-based dashboard so the whole pipeline can be run without the command line:
+`py3sta dashboard project/ [--port 8050]`. It runs on the GPU workstation; from a laptop use an SSH
+tunnel (`ssh -L 8050:localhost:8050 workstation`).
+
+**Principles**
+- The project folder is the single source of truth. The dashboard reads and writes the same configs,
+  STAR files and manifests as the CLI, so GUI and CLI can be mixed freely (start in the GUI, finish on
+  the command line, or the reverse).
+- No processing logic in the GUI: every button calls the same Python API the CLI uses.
+- Long steps run as background jobs (one queue per GPU) with live logs and progress; the browser can be
+  closed and reopened without killing jobs.
+
+**Pages**
+1. **Project** — create/open a project: input STAR, tomograms (`rlnMicrographName`), Warp XMLs
+   (`add-xml`), box, pixel size, CTF mode (with a `ctf-check` button), GPU/CPU settings. Shows particle
+   counts per tomogram, active vs excluded.
+2. **Cycles overview** — one row per cycle with the state of each step (done / running / stale /
+   missing), particle counts, FSC and resolution per cycle, global-average thumbnails; buttons for
+   "run next step", "run to …", "re-run from …", "new cycle".
+3. **Cycle parameters** — form editor for `cycle.yaml` (reference mode and masks, stack size, alignment
+   search ranges, PCA factors, classifiers and K list) with validation, defaults and help text; "copy from
+   previous cycle".
+4. **Viewers**
+   - volumes: orthogonal slices (XY/XZ/YZ) and projections with a slider, low-pass control; global
+     average, references, class averages, eigenvolumes side by side; masks overlaid;
+   - FSC curves (half maps, vs reference), scree plot, class counts, dendrogram;
+   - "Open in ChimeraX" (REST remote control) for any map.
+5. **Explore / classify** — the UMAP/PCA explorer (§2 step 7) embedded: colour by class / score /
+   tomogram, **lasso to define groups**, live class average of the current lasso selection (GPU),
+   compare K values and methods side by side.
+6. **Select** — choose a classification (K, method, or lasso groups); per class a card with its average,
+   member count and an `align / leave / exclude` toggle; target `each other` or a reference MRC; preview
+   of the aligned class averages; "write _final.star".
+7. **Particles** — table/filter of particles (tomogram, class history, scores, excluded flag); bulk
+   include/exclude (`py3sta flag`); export STAR (RELION 4 / Warp).
+8. **Jobs** — queue, running jobs, logs, GPU memory/utilisation, cancel/retry.
+
+**Technology (default; revisit when Phase 6 starts)**
+- Backend: FastAPI (REST + websocket for logs/progress) wrapping the py3sta API; job runner with
+  subprocesses (one worker per GPU).
+- Frontend: Plotly Dash for speed of development (pure Python, built-in lasso, sliders, forms); switch
+  to a FastAPI + small JS frontend only if Dash becomes limiting.
+- Images: slices rendered server-side (PNG) or sent as small arrays; volumes never shipped whole to the browser.
+- Single-user, local; optional token for shared workstations.
+
+**Phasing**
+- v0 (with Phase 4): stand-alone explorer HTML (lasso → groups.json).
+- v1 (Phase 6): read-only dashboard — cycles overview, viewers, FSC, logs.
+- v2 (Phase 6): run/edit — job queue, parameter forms, select page, flag management, live lasso averages.
+
+## 5. Phases and acceptance checks
 
 | Phase | Content | Acceptance |
 |---|---|---|
@@ -117,10 +169,11 @@ py3sta status
 | 3 | PCA (wedge-masked differences + plain), k-means, Ward, GMM, multi-K outputs | synthetic 2-state data separated; wedge factors absent |
 | 4 | UMAP + `explore` (static HTML lasso → groups.json → class_lasso.star) | groups round-trip into `select`; lasso on synthetic data reproduces true classes |
 | 5 | `select`: each/reference targets, leave/exclude (flag carried over), `flag --include/--exclude`, class-average alignment, propagate to members, full cycle | one full cycle on MIM019; next-cycle average ≥ previous (FSC, CC vs template) |
-| 6 | Reports (HTML per cycle), ChimeraX push, live explorer server (v2) | — |
+| 6 | Dashboard (§4): v1 read-only (cycles, viewers, FSC, logs), v2 run/edit (job queue, forms, select, flags, live lasso averages); ChimeraX push | a full cycle on MIM019 run entirely from the dashboard; CLI and GUI interchangeable on the same project |
 | 7 | CTF in alignment/MSA scores, multi-tomogram datasets (height sign), novaCTF comparison | — |
 
-## 5. Open questions (ask the user)
+## 6. Open questions (ask the user)
 
 - Stack precision default (float16 vs float32) once real dataset sizes are known.
 - Reference for class-average alignment when `each`: best-SNR class vs running average (default: running average).
+- Dashboard framework: Dash (default) vs FastAPI + custom JS; multi-user needs on shared workstations?

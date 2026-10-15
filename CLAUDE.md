@@ -60,7 +60,8 @@ python scripts/check_torch.py STAR TOMO --tilt XML --gpu 0
 
 - numpy implementation is the reference; any torch code needs a parity test (`importorskip("torch")`).
 - Every new physical convention needs (1) a synthetic test and (2) a real-data check on MIM019, recorded in PROGRESS.md.
-- Keep the CLI thin: logic lives in modules, CLI only parses, resolves files and reports.
+- Keep the CLI thin: logic lives in modules, CLI only parses, resolves files and reports. The planned
+  dashboard (PLAN.md §4) must call the same module API, so never put processing logic in CLI or GUI code.
 - New per-particle columns: use `rln*` names only when they mean exactly the RELION label; otherwise `py3sta*`
   (exception: `rlnWarpXMLfile`, chosen by the user).
 - Git: small commits with clear messages; never commit `data/`, MRC files or caches.

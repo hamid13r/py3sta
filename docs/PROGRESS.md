@@ -53,6 +53,7 @@ Next concrete tasks:
 - User wants PCA, k-means and UMAP, with lasso drawing on the UMAP plot to define particle groups (Phase 3–4).
 - Excluded particles are **kept** in the STAR file with `py3staExcluded = 1`, carried over to all later
   cycles and skipped by every step, until the user flips the flag back (`py3sta flag --include`). (PLAN.md §2)
+- A browser dashboard (GUI) for the whole pipeline is part of the plan (PLAN.md §4, Phase 6); CLI and GUI share the project folder.
 - GPU backend confirmed working by the user with `py3sta average --backend torch` (CUDA 12.2).
 
 ## Open questions
