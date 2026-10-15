@@ -27,7 +27,7 @@ project/
     05_classify/             # class_K004.star ... (one per K and method), class averages, counts, dendrogram
     06_embed/                # UMAP/t-SNE embeddings, user-drawn selections (lasso groups)
     07_select/               # selection.yaml (chosen K / groups, per-class action + target), class-average alignment
-    cycle-000_final.star     # copied to cycle-001/00_input.star by `next`
+    08_final/cycle-000_final.star   # copied to cycle-001/00_input.star by `next`
 ```
 
 - Every step reads only its upstream outputs and writes its own folder + `manifest.json`
@@ -122,9 +122,11 @@ keeps ~80 % amplitude per pass at half Nyquist, ~27 Å on MIM019).
      running average) or **to a reference MRC**; targets can be mixed per class group,
    - class transforms are composed onto every member's pose; `leave` keeps poses;
    - `exclude` sets `py3staExcluded = 1` on the members (see "Excluded particles" below).
-8. **Final** — `cycle-NNN_final.star`: new angles/origins (RELION 4), `rlnClassNumber`, `py3staCycle`,
-   scores; summary report.
-9. **Next** — `py3sta next` creates `cycle-NNN+1/`, copies `cycle.yaml`, links `00_input.star`.
+8. **Final** — `08_final/cycle-NNN_final.star`: poses from the last pose-writing step (select, else align,
+   else the input), every particle kept, `rlnClassNumber`, `py3staCycle`, scores; summary report. (done, no
+   class numbers / report yet)
+9. **Next** — `py3sta next` creates `cycle-NNN+1/`, copies `cycle.yaml` (only `cycle:` changed) and the final
+   STAR as `00_input.star` (a copy). (done)
 
 ### Excluded particles
 
@@ -159,8 +161,8 @@ py3sta status
 - **Map-to-map alignment** (done, `align.py`, `py3sta align-maps`): global SO(3) grid + FFT shift search on binned
   maps, local grids, 6-D polish (rotation + sub-voxel shift on the exact-pose CC), hand check, contrast check.
   Particle MRA reuses the masked-CC-over-shifts core with the reference rotated per pose.
-- **Pose composition**: delta (R, t) in reference frame → new particle matrix and centre; one function,
-  tested with synthetic known transforms (both for MRA and class-average propagation).
+- **Pose composition** (done, `poses.py`): delta (R, t) in reference frame → M' = R·M, c' = c + M'ᵀt; one
+  function for MRA and class-average propagation; `align_maps` results compose directly.
 - **Masks/filters**: sphere, ellipsoid, box, cylinder, file; soft edges; band-pass in Å.
 
 ## 4. Dashboard (GUI)

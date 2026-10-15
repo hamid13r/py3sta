@@ -17,14 +17,16 @@ src/py3sta/
   wedge.py           TiltInfo (Warp XML / .tlt), missing wedge, dose, CTF (CTFParams, particle_defocus, ctf_transfer)
   average.py         extract (trilinear), average_particles (multiprocess, wedge/dose/CTF Wiener), fsc, path resolution
   backend_torch.py   PyTorch/CUDA mirror of extract/wedge/average (must stay numerically equal to numpy)
+  poses.py           pose composition: delta (R, t) in the reference frame -> M' = R M, c' = c + M'.T t
   align.py           map-to-map alignment: resample, SO(3) grid, masked CC over shifts (numpy + torch), polish, mirror
   reference.py       masks (sphere/ellipsoid/box/file, soft edges in Å), band-pass, fit_box, prepare_reference
   stack.py           project particle stack: unrotated float16 crops, refresh_stack (new / tomogram changed / drift)
-  cli.py             click CLI: init run status stack align-maps pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
+  cli.py             click CLI: init run status next stack align-maps pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
   io/                star.py (dependency-free STAR), mrc.py (numpy MRC), trf.py (i3), dipole.py (.pos picks),
                      particles.py (ParticleSet = RELION-4 particle table + tomo_key naming)
-  pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks), manifest.py (run_step,
-                     change tracking, states), steps.py (step order + 01_average), runner.py (run_cycle, status)
+  pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks, next_cycle),
+                     manifest.py (run_step, change tracking, states), steps.py (step order, 01_average,
+                     02_reference, 08_final), runner.py (run_cycle, status)
   utils/             stand-alone utilities (each also `python -m py3sta.utils.<name>`), e.g. add_warp_xml
 tests/               pytest; scipy/torch tests auto-skip when not installed
 scripts/check_torch.py   GPU vs numpy parity + timing on real data

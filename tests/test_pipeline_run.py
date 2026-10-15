@@ -11,9 +11,10 @@ import yaml
 from py3sta.geometry import euler_to_matrix
 from py3sta.io.mrc import read_mrc, write_mrc
 from py3sta.io.star import read_star, write_star
-from py3sta.pipeline import init_project, load_project
+from py3sta.pipeline import ConfigError, init_project, load_project
 from py3sta.pipeline import runner, steps
 from py3sta.pipeline.manifest import StepError, check_state, read_manifest, run_step, write_manifest
+from py3sta.pipeline.project import next_cycle
 from py3sta.pipeline.runner import project_status, run_cycle, step_state
 
 BOX = 16
@@ -239,7 +240,99 @@ def test_status_and_cli(proj):
     assert "stack: 40 particles" in r.output and "low CC: TS_04" in r.output
     st = project_status(proj)
     assert st.drift_warning == 0 and st.cycles[0].n_particles == 40
-    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "reference"])
+    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "reference", "--to", "reference"])
     assert r.exit_code == 0 and "1 reference(s)" in r.output, r.output
-    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "align"])
+    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "msa", "--to", "embed"])
     assert r.exit_code != 0 and "no implemented step" in r.output
+    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "final"])
+    assert r.exit_code == 0 and "40 particles, poses from 00_input.star" in r.output, r.output
+    r = CliRunner().invoke(main, ["next", str(proj.root), "cycle-000"])
+    assert r.exit_code == 0 and "cycle-001: 40 particles from cycle-000_final.star" in r.output, r.output
+    r = CliRunner().invoke(main, ["status", str(proj.root)])
+    assert "cycle-001  40 particles" in r.output and "08_final       done" in r.output, r.output
+
+
+# ------------------------------------------------------------ final / next
+def _final(proj, n=0):
+    return proj.cycle_dir(n) / "08_final" / f"cycle-{n:03d}_final.star"
+
+
+def test_final_and_next(proj):
+    cin = proj.cycle_input(0)
+    b = read_star(cin)
+    b["particles"]["py3staExcluded"] = [1] * 8 + [0] * 32
+    write_star(b, cin)
+    with pytest.raises(ConfigError, match="final step is missing"):
+        next_cycle(proj, 0)
+    run_cycle(proj, 0)
+    fin = read_star(_final(proj))["particles"]
+    assert len(fin) == 40 and (fin["py3staCycle"] == 0).all() and fin["py3staExcluded"].sum() == 8
+    assert set(read_star(_final(proj))) == set(b)                       # optics block kept
+    rep = next_cycle(proj, 0)
+    assert (rep.n, rep.n_particles, rep.warnings) == (1, 40, [])
+    assert proj.cycles == [0, 1] and proj.cycle_config(1).cycle == 1
+    text = (proj.cycle_dir(1) / "cycle.yaml").read_text()
+    assert text == (proj.cycle_dir(0) / "cycle.yaml").read_text().replace("cycle: 0", "cycle: 1")   # comments kept
+    assert (proj.cycle_input(1)).read_bytes() == _final(proj).read_bytes()
+    with pytest.raises(ConfigError, match="exists"):
+        next_cycle(proj, 0)
+    # cycle 1 runs from the copy; excluded particles stay excluded
+    run_cycle(proj, 1, stop="average")
+    assert read_manifest(proj.cycle_dir(1) / "01_average")["info"]["n_used"] == 32
+
+
+def test_next_refuses_stale_final_and_keeps_edits(proj):
+    run_cycle(proj, 0)
+    fin = _final(proj)
+    b = read_star(fin)
+    b["particles"].loc[3, "rlnAngleRot"] += 5                         # hand edit of the final STAR
+    write_star(b, fin)
+    rep = next_cycle(proj, 0)
+    assert rep.warnings and "edited by hand" in rep.warnings[0]
+    assert read_star(proj.cycle_input(1))["particles"].loc[3, "rlnAngleRot"] == b["particles"].loc[3, "rlnAngleRot"]
+    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["average"].update(normalize=False))
+    st = step_state(proj, 0, "final")
+    assert st.state == "done"                                       # final does not depend on the average
+    cin = proj.cycle_input(0)
+    b = read_star(cin)
+    b["particles"].loc[0, "rlnAngleTilt"] += 1
+    write_star(b, cin)
+    assert step_state(proj, 0, "final").state == "stale"
+    with pytest.raises(ConfigError, match="final step is stale"):
+        next_cycle(proj, 0, force=False)
+    rep = next_cycle(proj, 0, force=True)
+    assert any("stale" in w for w in rep.warnings)
+
+
+def test_final_reads_pose_source(proj, monkeypatch):
+    """With a pose-writing step implemented, final copies its poses, depends on it and checks no particle is lost."""
+    from py3sta.io.particles import ParticleSet
+    from py3sta.poses import apply_delta
+
+    def fake_align(ctx, project, n, c):
+        ps = ParticleSet.from_star(project.cycle_input(n))
+        moved = apply_delta(ps, euler_to_matrix(10, 20, 30), np.array([1.0, 0, 0]), project.config.apix)
+        b = read_star(project.cycle_input(n))
+        cols = ["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi", "rlnOriginXAngst", "rlnOriginYAngst", "rlnOriginZAngst"]
+        b["particles"][cols] = moved.df[cols].to_numpy()
+        write_star(b, ctx.output_star("aligned.star"))
+
+    fake = steps.Step("align", "03_align", ("reference",), lambda p, c: {}, fake_align, poses="aligned.star")
+    new = tuple(fake if s.name == "align" else s for s in steps.STEPS)
+    monkeypatch.setattr(steps, "STEPS", new)
+    monkeypatch.setattr(runner, "STEPS", new)
+    monkeypatch.setitem(steps.BY_NAME, "align", fake)
+    run_cycle(proj, 0)
+    m = read_manifest(_final(proj).parent)
+    assert m["info"]["pose_source"] == "align" and "align" in m["inputs"]["steps"]
+    fin = read_star(_final(proj))["particles"]
+    aligned = read_star(proj.cycle_dir(0) / "03_align" / "aligned.star")["particles"]
+    np.testing.assert_allclose(fin["rlnAngleRot"], aligned["rlnAngleRot"])
+    run_cycle(proj, 0, start="align", stop="align")
+    assert step_state(proj, 0, "final").reasons == ["upstream align re-run"]
+    a = proj.cycle_dir(0) / "03_align" / "aligned.star"
+    b = read_star(a)
+    b["particles"] = b["particles"].iloc[:-1]
+    write_star(b, a)
+    with pytest.raises(ValueError, match="1 particle"):
+        run_cycle(proj, 0, start="final")

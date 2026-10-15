@@ -224,3 +224,47 @@ def init_project(root, star, box: int | None = None, ctf_mode: str = "none", wed
 
     per_tomo = names.value_counts(sort=False).to_dict()
     return InitReport(Project(root, cfg), len(ps), per_tomo, tomos, tilt_ranges, warnings)
+
+
+@dataclass
+class NextReport:
+    n: int                           # the new cycle
+    n_particles: int
+    source: Path                     # the final STAR copied to 00_input.star
+    warnings: list[str] = field(default_factory=list)
+
+
+def next_cycle(project: Project, n: int, force: bool = False) -> NextReport:
+    """Create cycle n+1: cycle.yaml copied from cycle n (only ``cycle:`` changed, comments kept) and
+    00_input.star = copy of cycle n's final STAR (hand edits included).
+
+    Refuses when the final step of cycle n is not done (missing / stale / failed) or cycle n+1
+    already exists; ``force`` overrides both (an existing cycle n+1 gets new cycle.yaml / 00_input.star,
+    so its steps become stale)."""
+    from .runner import step_state
+    from .steps import final_name, get_step
+
+    st = step_state(project, n, "final")
+    src = project.cycle_dir(n) / get_step("final").folder / final_name(n)
+    warnings = []
+    if not st.ok:
+        if not force or not src.is_file():
+            raise ConfigError(f"{cycle_dirname(n)}: final step is {st.describe()}; run "
+                              f"'py3sta run {project.root} {n} --from final'"
+                              + (" (or use --force)" if src.is_file() else ""))
+        warnings.append(f"final step is {st.state}; copying {src.name} anyway (--force)")
+    if st.edited:
+        warnings.append(f"{', '.join(st.edited)} was edited by hand; the edited version is used")
+    dst = project.cycle_dir(n + 1)
+    if dst.exists() and not force:
+        raise ConfigError(f"{dst} exists (use --force to replace its cycle.yaml and 00_input.star)")
+    text = (project.cycle_dir(n) / CYCLE_FILE).read_text()
+    text, k = re.subn(r"(?m)^cycle:\s*\d+\s*$", f"cycle: {n + 1}", text, count=1)
+    if k != 1:
+        raise ConfigError(f"{project.cycle_dir(n) / CYCLE_FILE}: no 'cycle:' line")
+    dst.mkdir(exist_ok=True)
+    (dst / CYCLE_FILE).write_text(text)
+    shutil.copyfile(src, dst / CYCLE_INPUT)
+    project.cycle_config(n + 1)                                  # validates the copy
+    n_part = len(load_particles(project, dst / CYCLE_INPUT)[0])
+    return NextReport(n + 1, n_part, src, warnings)

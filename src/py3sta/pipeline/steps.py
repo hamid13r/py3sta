@@ -18,6 +18,7 @@ class Step:
     upstream: object = ()             # tuple of step names, or (CycleConfig) -> tuple (mode-dependent)
     params: object = None             # (ProjectConfig, CycleConfig) -> dict
     run: object = None                # (StepContext, Project, n, CycleConfig) -> None
+    poses: str | None = None          # STAR output with updated particle poses (read by 'final')
 
     @property
     def implemented(self) -> bool:
@@ -171,15 +172,64 @@ def run_reference(ctx, project, n: int, c: CycleConfig) -> None:
             + ", ".join(f"{row['py3staReferenceCC']:.3f}" for row in rows))
 
 
+# ------------------------------------------------------------------- final
+def final_name(n: int) -> str:
+    return f"cycle-{n:03d}_final.star"
+
+
+def pose_source(c: CycleConfig | None = None) -> Step | None:
+    """The last implemented step that writes particle poses (select, else align); None = 00_input.star."""
+    return next((s for s in reversed(STEPS) if s.poses and s.implemented), None)
+
+
+def final_upstream(c: CycleConfig) -> tuple:
+    src = pose_source(c)
+    return (src.name,) if src else ()
+
+
+def final_params(p: ProjectConfig, c: CycleConfig) -> dict:
+    return {"cycle": c.cycle}
+
+
+def _particle_block(blocks: dict):
+    return blocks["particles"] if "particles" in blocks else next(iter(blocks.values()))
+
+
+def run_final(ctx, project, n: int, c: CycleConfig) -> None:
+    """cycle-NNN_final.star: every particle of the pose source (excluded rows included, unchanged)
+    plus py3staCycle; the next cycle's 00_input.star is a copy of it."""
+    from ..io.star import read_star, write_star
+    from .project import PARTICLE_NAME, load_particles
+
+    src = pose_source(c)
+    path = project.cycle_input(n) if src is None else project.cycle_dir(n) / src.folder / src.poses
+    ctx.read_star(path)
+    load_particles(project, path)                             # validates (also after hand edits)
+    blocks = read_star(path)
+    df = _particle_block(blocks)
+    df["py3staCycle"] = n
+    if src is not None:                                       # a step must not drop particles
+        names_in = _particle_block(read_star(project.cycle_input(n)))[PARTICLE_NAME].astype(str)
+        lost = set(names_in) - set(df[PARTICLE_NAME].astype(str))
+    else:
+        lost = ()
+    if lost:
+        raise ValueError(f"{path.name}: {len(lost)} particle(s) of 00_input.star missing: {', '.join(sorted(lost)[:5])}")
+    write_star(blocks, ctx.output_star(final_name(n)))
+    ctx.info.update(n_particles=len(df), pose_source=src.name if src else "input")
+    ctx.log(f"{final_name(n)}: {len(df)} particles, poses from {src.name if src else '00_input.star'}")
+
+
 # ------------------------------------------------------------------- order
 STEPS: tuple[Step, ...] = (
     Step("average", "01_average", (), average_params, run_average),
     Step("reference", "02_reference", reference_upstream, reference_params, run_reference),
-    Step("align", "03_align", ("reference",)),
+    Step("align", "03_align", ("reference",), poses="aligned.star"),
     Step("msa", "04_msa", ("align",)),
     Step("classify", "05_classify", ("msa",)),
     Step("embed", "06_embed", ("classify",)),
-    Step("select", "07_select", ("classify",)),
+    Step("select", "07_select", ("classify",), poses="selected.star"),
+    Step("final", "08_final", final_upstream, final_params, run_final),
 )
 BY_NAME = {s.name: s for s in STEPS}
 

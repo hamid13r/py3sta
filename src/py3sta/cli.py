@@ -224,6 +224,25 @@ def status(project_dir):
             click.echo(f"  (not implemented yet: {', '.join(pending)})")
 
 
+@main.command("next")
+@click.argument("project_dir")
+@click.argument("cycle")
+@click.option("--force", is_flag=True, help="Copy the final STAR even if the final step is stale; replace an existing next cycle's cycle.yaml and 00_input.star.")
+def next_cmd(project_dir, cycle, force):
+    """Start the cycle after CYCLE: copy cycle.yaml (edit it before running) and the final STAR as 00_input.star."""
+    from .pipeline import ConfigError, load_project
+    from .pipeline.project import cycle_dirname, next_cycle
+
+    try:
+        rep = next_cycle(load_project(project_dir), _cycle_number(cycle), force)
+    except ConfigError as e:
+        raise click.ClickException(str(e))
+    for w in rep.warnings:
+        click.echo(f"warning: {w}")
+    click.echo(f"{cycle_dirname(rep.n)}: {rep.n_particles} particles from {rep.source.name}; "
+               f"edit {cycle_dirname(rep.n)}/cycle.yaml, then 'py3sta run {project_dir} {rep.n}'")
+
+
 @main.command()
 @click.argument("pos", nargs=-1, required=True)
 @click.option("--pick-apix", type=float, required=True, help="Pixel size (A) of the tomograms the picks were made on.")

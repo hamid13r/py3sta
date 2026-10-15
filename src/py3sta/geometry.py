@@ -53,10 +53,13 @@ def matrix_to_euler(m) -> np.ndarray:
     tilt in [0, 180]; rot, psi in (-180, 180]. At gimbal lock psi is set to 0.
     """
     m = np.asarray(m, dtype=float)
-    tilt = np.arccos(np.clip(m[..., 2, 2], -1.0, 1.0))
-    sb = np.sin(tilt)
+    sb = np.hypot(m[..., 0, 2], m[..., 1, 2])
+    tilt = np.arctan2(sb, m[..., 2, 2])
     rot = np.arctan2(m[..., 1, 2], m[..., 0, 2])
-    psi = np.arctan2(m[..., 2, 1], -m[..., 2, 0])
+    # psi from the residual Rz(psi) = Ry(-tilt) Rz(-rot) M: stays consistent with rot near gimbal lock,
+    # where rot and psi are each ill-determined but their combination is not
+    n = _ry(-tilt) @ _rz(-rot) @ m
+    psi = np.arctan2(n[..., 1, 0], n[..., 0, 0])
     lock = sb < _EPS
     if np.any(lock):
         up = lock & (m[..., 2, 2] > 0)

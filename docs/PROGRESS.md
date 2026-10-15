@@ -15,11 +15,42 @@ Done:
 3. ✅ Reference step (global, file, multi-reference) with masks + band-pass in Å; project-level
    `invert_contrast` (2026-10-15, see below).
 
+4. ✅ Pose composition (`poses.py`), `08_final` → `cycle-NNN_final.star`, `py3sta next` (2026-10-15, see below).
+
 Next concrete tasks:
-4. Pose composition function + synthetic tests; `_final.star` writer; `py3sta next` (copies 00_input).
 5. Dummy classification from existing `rlnClassNumber` to run select/final end-to-end before the real engines exist.
 6. `py3sta flag` (the `py3staExcluded` filter itself is already honoured by `load_cycle_input`).
 7. `py3sta set-tomograms` STAR helper (swap reconstructions by `tomo_key()`).
+
+## Phase 1 task 4 — pose composition, `08_final`, `py3sta next` (2026-10-15)
+
+- `poses.py`: a delta (R, t) in the reference frame (t in box voxels) means "new subvolume = old one sampled
+  at Rᵀ(r + t)" — the same meaning as `align.apply_alignment`, so `align_maps` results compose directly:
+  **M' = R·M, c' = c + M'ᵀ·t**. `compose`, `chain` ((R2R1, R2t1 + t2)), `invert` ((Rᵀ, −Rᵀt)),
+  `apply_delta(ps, R, t, apix, rows=)` (one delta for a class or one per particle; new angles; shift goes into
+  `rlnOrigin*Angst`, coordinates unchanged as in RELION). Mirrored transforms are refused.
+- Bug fixed in `geometry.matrix_to_euler`: within ~1e-6 of gimbal lock (tilt ≈ 0/180°) rot and psi were each
+  computed from tiny numbers and no longer reproduced the matrix (error 0.05 seen in the round trip).
+  psi is now taken from the residual rotation Ry(−tilt)·Rz(−rot)·M, so the angles always reproduce M.
+- `08_final` (step `final`): poses from the last implemented step that writes poses (`07_select/selected.star`,
+  else `03_align/aligned.star`, else `00_input.star`; recorded as upstream), every row kept (excluded too),
+  `py3staCycle` added, all STAR blocks kept, refuses if the pose source lost particles. Output is a tracked
+  (editable) STAR. `rlnClassNumber` comes later with select.
+- `py3sta next PROJECT CYCLE` (`project.next_cycle`): new `cycle-NNN+1/` with `cycle.yaml` copied (only the
+  `cycle:` line changed, comments kept) and `00_input.star` = copy of the final STAR (hand edits included,
+  with a warning). Refuses if `final` is missing/stale or the next cycle exists (`--force`).
+- Tests: chain/invert identities; round trip to 1e-10 (matrices) / 1e-6 px (centres) incl. gimbal lock and
+  per-particle deltas; extraction with the composed pose == obj(Rᵀ(r + t)) (CC > 0.995, analytic tomogram,
+  ts_apix ≠ apix); two classes with different known errors: `align_maps` on each class average + composition
+  restores all member poses (< 1°, < 0.2 voxel); final/next/staleness/edit/pose-source pipeline tests.
+
+| MIM019 check (6081 particles, torch cuda:0) | value |
+|---|---|
+| average with poses composed with R = (25°, 10°, −15°), t = (2, 0, −1) voxels vs old average moved by (R, t) | CC **0.9993** |
+| same vs old average unmoved (control) | CC 0.496 |
+| round trip (delta then inverse) | matrices 1.5e-15, centres 5.7e-14 px |
+| average time from the stack (original / composed poses) | 5.6 s / 5.3 s |
+| `run --from final` + `next` on `data/mim019_project` | 0.2 s; `cycle-001/00_input.star` byte-identical to the final STAR |
 
 ## Phase 2 (started early) — map-to-map alignment, `py3sta align-maps` (2026-10-15)
 
