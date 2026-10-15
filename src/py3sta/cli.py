@@ -53,6 +53,39 @@ def main():
 
 
 @main.command()
+@click.argument("project_dir")
+@click.option("--star", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Particle STAR file (tomograms in rlnMicrographName, tilts in rlnWarpXMLfile).")
+@click.option("--box", type=int, help="Box size in tomogram voxels. Default: rlnImageSize from data_optics.")
+@click.option("--ctf", "ctf_mode", type=click.Choice(["none", "flip", "wiener", "amplitude"]), default="none",
+              show_default=True, help="CTF correction (decide with 'py3sta ctf-check').")
+@click.option("--wedge/--no-wedge", default=None, help="Wedge weighting. Default: on if rlnWarpXMLfile is present.")
+@click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
+@click.option("--gpu", default="0", show_default=True, help="GPU index, or 'cpu' (torch backend).")
+@click.option("-j", "--jobs", type=int, default=0, show_default=True, help="CPU worker processes (0 = all cores).")
+@click.option("--force", is_flag=True, help="Overwrite project.yaml, input.star and cycle-000/cycle.yaml.")
+def init(project_dir, star, box, ctf_mode, wedge, backend, gpu, jobs, force):
+    """Create a project folder (project.yaml, input.star, cycle-000/) from a particle STAR file."""
+    from .pipeline import ConfigError, init_project
+
+    try:
+        rep = init_project(project_dir, star, box=box, ctf_mode=ctf_mode, wedge=wedge, backend=backend,
+                           gpu=int(gpu) if gpu.isdigit() else gpu, jobs=jobs, force=force)
+    except (ConfigError, ValueError, FileNotFoundError, NotImplementedError) as e:
+        raise click.ClickException(str(e))
+    cfg = rep.project.config
+    click.echo(f"{rep.n_particles} particles in {len(rep.per_tomo)} tomograms")
+    for t, n in rep.per_tomo.items():
+        rng = rep.tilt_ranges.get(t)
+        click.echo(f"  {t:40s} {n:6d}" + (f"   tilts {rng[0]:.1f}..{rng[1]:.1f} deg" if rng else ""))
+    click.echo(f"box {cfg.box} voxels at {cfg.apix:g} Å ({cfg.box_angst:g} Å); coordinates at {cfg.ts_apix:g} Å; "
+               f"wedge {'on' if cfg.wedge.use else 'off'}; ctf {cfg.ctf.mode}; {cfg.compute.backend} backend")
+    for w in rep.warnings:
+        click.echo(f"warning: {w}")
+    click.echo(f"project written to {rep.project.root} (edit cycle-000/cycle.yaml, then run cycle-000)")
+
+
+@main.command()
 @click.argument("pos", nargs=-1, required=True)
 @click.option("--pick-apix", type=float, required=True, help="Pixel size (A) of the tomograms the picks were made on.")
 @click.option("--ts-apix", type=float, help="Unbinned tilt-series pixel size (A) for RELION 4 coordinates. Default: --pick-apix.")

@@ -17,9 +17,10 @@ src/py3sta/
   wedge.py           TiltInfo (Warp XML / .tlt), missing wedge, dose, CTF (CTFParams, particle_defocus, ctf_transfer)
   average.py         extract (trilinear), average_particles (multiprocess, wedge/dose/CTF Wiener), fsc, path resolution
   backend_torch.py   PyTorch/CUDA mirror of extract/wedge/average (must stay numerically equal to numpy)
-  cli.py             click CLI: pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
+  cli.py             click CLI: init pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
   io/                star.py (dependency-free STAR), mrc.py (numpy MRC), trf.py (i3), dipole.py (.pos picks),
                      particles.py (ParticleSet = RELION-4 particle table + tomo_key naming)
+  pipeline/          config.py (project.yaml / cycle.yaml schema + validation), project.py (init, load, cycles)
   utils/             stand-alone utilities (each also `python -m py3sta.utils.<name>`), e.g. add_warp_xml
 tests/               pytest; scipy/torch tests auto-skip when not installed
 scripts/check_torch.py   GPU vs numpy parity + timing on real data
@@ -27,6 +28,10 @@ data/                local test data and results — git-ignored, never commit (
 ```
 
 ## Commands
+
+For now everything runs in the micromamba env `tomo_toolshed` (`conda activate tomo_toolshed`).
+It has `torch==2.5.1+cu121` (cu13x builds do not work with the CUDA 12.2 driver) and `pyyaml`.
+A dedicated py3sta env will replace it later.
 
 ```bash
 pip install -e ".[test]"            # + torch: pip install torch --index-url https://download.pytorch.org/whl/cu121  (CUDA 12.2 driver)
@@ -68,7 +73,6 @@ python scripts/check_torch.py STAR TOMO --tilt XML --gpu 0
 
 ## Test data (local, not in git)
 
-`data/MIM019_2_lam11_ts_003.star` — 265 particles (Warp/M export, 6.65 Å, box 72, has rlnRandomSubset).
-Tomograms + Warp XML + `template.mrc` (CTF-corrected reference) live in
-`~/Documents/Claude/Projects/RealSpaceTM/repo/data/` (Warp `…_6.65Apx.mrc`, `…_etomo.mrc`, `…_nova_dw.mrc`, `…mrc.xml`).
+`/data1/users/hamid/robpicker_MIM019/py3sta_test/` —  ~6K particles (relion export, 6.65 Å, box 72, has rlnRandomSubset).
+Tomograms + Warp XML + `average.mrc` 
 Results of earlier checks: `data/average_test/`.

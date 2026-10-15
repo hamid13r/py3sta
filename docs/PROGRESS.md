@@ -4,10 +4,12 @@ Update at the end of every work session: move items, add findings with numbers, 
 
 ## Current focus
 
-**Phase 1 — pipeline skeleton** (see PLAN.md §4). Nothing started yet.
+**Phase 1 — pipeline skeleton** (see PLAN.md §1–2, §5).
+
+Done:
+1. ✅ `project.yaml` / `cycle.yaml` schema + loader with validation; `py3sta init` (2026-10-14, see below).
 
 Next concrete tasks:
-1. `project.yaml` / `cycle.yaml` schema + loader with validation; `py3sta init`.
 2. Cycle folder + `manifest.json` + `py3sta status` (done / stale / missing).
 3. Reference step (global, file) with masks + band-pass in Å.
 4. Stack step: pre-rotated `stack.mrcs` (float16) + `stack.star`, CPU multiprocess + torch.
@@ -56,6 +58,53 @@ Next concrete tasks:
 - A browser dashboard (GUI) for the whole pipeline is part of the plan (PLAN.md §4, Phase 6); CLI and GUI share the project folder.
 - GPU backend confirmed working by the user with `py3sta average --backend torch` (CUDA 12.2).
 
+## Phase 1 task 1 — configs + `py3sta init` (2026-10-14)
+
+- `src/py3sta/pipeline/config.py`: dataclasses `ProjectConfig` (box, apix, ts_apix, wedge, ctf, compute)
+  and `CycleConfig` (average, reference + mask, stack); strict YAML loader (unknown key → error with
+  "did you mean"); all value errors collected and reported with file + dotted key; cycle checks against
+  the project (mask radius + soft + |center| ≤ half box, lowpass ≥ Nyquist, msa_box ≤ box).
+  No pydantic; new dependency `pyyaml`.
+- `src/py3sta/pipeline/project.py`: `init_project()`, `load_project()`, `Project` (cycles, cycle_config).
+  `init` checks that all tomograms (`rlnMicrographName`) and XMLs exist, that all tomograms share one
+  voxel size (header rounded to 1e-4 Å, as MRC stores float32), and that the XMLs have CTF if `--ctf` is set.
+  It writes `input.star` from the **raw STAR blocks** (all columns kept; only the path columns made
+  absolute, keeping symlink names because `tomo_key()` reads the file name). `ParticleSet.to_relion4`
+  is not used because it rewrites `rlnMicrographName` to `.tomostar`. `cycle-000/00_input.star` is a relative
+  symlink to `../input.star`. Defaults: box = `rlnImageSize`, wedge on if `rlnWarpXMLfile` is present,
+  mask radius 40 % / soft edge 10 % of the box, lowpass max(30 Å, 4·apix).
+- Tests: `tests/test_pipeline_config.py` (12 tests: roundtrip, unknown keys, types, value checks,
+  init on synthetic tomograms + XML, force, no-XML, mixed voxel size, missing tomogram, CLI).
+- Real data: `py3sta init data/mim019_project --star .../py3sta_test/ribosome.star` → 6081 particles,
+  34 tomograms, box 72 at 6.65 Å (478.8 Å), wedge on, tilt ranges ≈ −67…+47–56°, rlnRandomSubset
+  2980/3101; 1.8 s. The project reloads and its `input.star` resolves all 34 tomograms.
+
+## GPU parity (2026-10-14, `scripts/check_torch.py`, RTX A5000, torch 2.5.1+cu121)
+
+Data: `/data1/users/hamid/robpicker_MIM019/py3sta_test/ribosome.star`, tomogram `MIM019_2_lam1_ts_002`
+(196 rows, Warp XML tilts), box 72, 6.65 Å. Max relative difference torch vs numpy:
+
+| Check | n=100 | n=196 |
+|---|---|---|
+| extraction (8 ptcl) | 1.1e-4 | — |
+| wedge weights, no dose | 4.2e-5 | — |
+| wedge weights, dose | 5.1e-3 (*) | — |
+| average plain | 7.1e-6 — numpy 8.3 s / torch 2.5 s | 4.7e-6 — numpy 13.6 s / torch 2.1 s (6.5×) |
+| average wedge | 4.9e-6 — numpy 7.8 s / torch 2.2 s | 3.4e-6 — numpy 15.2 s / torch 1.2 s (13×) |
+
+(*) A single voxel in one particle (0.0607 vs 0.0658), where the nearest tilt switches because of float32
+rounding. All other voxels agree to ~1e-5. Harmless.
+numpy timings are single-process (`jobs=1`); torch time includes the first CUDA call.
+
+Environment: `conda activate tomo_toolshed`. Its torch was `2.14.1+cu130`, which cannot use the CUDA 12.2
+driver. With the user's OK (only py3sta uses torch there) it was replaced by `torch==2.5.1+cu121`
+(`pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121`); CUDA works, and `pip check`
+reports no torch conflicts. A dedicated py3sta conda env is planned (user).
+
+`test_io.py::test_dipoles_match_legacy_pos2i3` differed from scipy 1.15.3 `align_vectors` by up to 2.5e-5
+(first run with scipy; non-normalised secondary vectors). Tolerance loosened to 1e-3 (user: dipole
+conversion need not be precise). All tests pass.
+
 ## Open questions
 
-- Numerical parity numbers from `scripts/check_torch.py` on the GPU not yet recorded (backend runs; record diffs + timing).
+- Dedicated py3sta conda env (user will create it); then update CLAUDE.md.

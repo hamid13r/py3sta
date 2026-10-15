@@ -7,7 +7,7 @@ name = "py3sta"
 version = "0.0.1"
 description = "GPU-accelerated i3-style subtomogram averaging, RELION 4 / Warp compatible"
 requires-python = ">=3.9"
-dependencies = ["numpy", "pandas", "click"]
+dependencies = ["numpy", "pandas", "click", "pyyaml"]
 
 [project.optional-dependencies]
 test = ["pytest", "scipy"]
