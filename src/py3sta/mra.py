@@ -311,7 +311,7 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
                 for p in range(P):
                     cc[p], t_sub, _ = best_shift(fx_peak, maps[p])
                     d = M[p] @ (cen[p] + M[p].T @ (t_sub * pr.bin) - centres[ids[p]])   # total, reference frame
-                    hit[p] = lim > 0 and np.any(np.abs(d) >= lim - 0.5)
+                    hit[p] = lim > 0 and np.any(np.abs(d) >= lim - 1e-3)               # clipped at the limit
                     new[p] = centres[ids[p]] + M[p].T @ np.clip(d, -lim, lim)
                 return cc, new, hit
 

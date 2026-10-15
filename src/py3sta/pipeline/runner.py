@@ -82,7 +82,10 @@ def run_cycle(project: Project, n: int, start: str | None = None, stop: str | No
                 us = step_state(project, n, up, cache)
                 if not us.ok:
                     raise StepError(f"upstream step {up} is {us.describe()}; run with --from {up} (or --force)")
-    refresh_project_stack(project, n, log)
+    shift = 0
+    if any(s.name == "align" for s in todo) and cycle_cfg.align.enable:
+        shift = project.config.align_shift_vox(cycle_cfg.align.max_shift)     # room for this cycle's shifts
+    refresh_project_stack(project, n, log, shift_limit=shift)
     _, device = resolve_device(project.config.compute)
     out = []
     for s in todo:

@@ -100,7 +100,7 @@ def test_steps_stale_and_cli(proj):
     assert step_state(proj, 0, "average").state == "done"
     r = CliRunner().invoke(main, ["flag", str(proj.root), "cycle-000", "--exclude", "tomo:TS_04"])
     assert r.exit_code == 0 and "excluded 0 -> 8 of 40; active 32" in r.output, r.output
-    assert "steps now stale: average, reference, classify, select, final" in r.output
+    assert "steps now stale: average, reference, align, classify, select, final" in r.output
     st = step_state(proj, 0, "average")
     assert st.state == "stale" and st.reasons == ["cycle-000/00_input.star changed"]
     run_cycle(proj, 0)

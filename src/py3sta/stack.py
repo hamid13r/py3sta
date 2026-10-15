@@ -165,8 +165,8 @@ def refresh_stack(root, ps: ParticleSet, tomograms: dict, box: int, margin: int,
     t0 = time.time()
     if margin < 1:
         raise StackError(f"stack margin must be >= 1 voxel (got {margin})")
-    if max_drift(margin) - shift_limit < 0:
-        raise StackError(f"shift limit {shift_limit} exceeds the drift the stack margin allows ({max_drift(margin)})")
+    if max_drift(margin) - shift_limit < 1:            # a fresh crop may be 0.5 voxel off-centre
+        raise StackError(f"shift limit {shift_limit} voxel(s) needs a stack margin >= {shift_limit + 2} (is {margin})")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     rep = RefreshReport()

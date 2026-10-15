@@ -27,7 +27,7 @@ src/py3sta/
                      particles.py (ParticleSet = RELION-4 particle table + tomo_key naming)
   pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks, next_cycle), flags.py (flag),
                      manifest.py (run_step, change tracking, states), steps.py (step order, pose sources,
-                     01_average, 02_reference, 05_classify (column), 07_select, 08_final), runner.py (run_cycle, status)
+                     01_average, 02_reference, 03_align, 05_classify (column), 07_select, 08_final), runner.py (run_cycle, status)
   utils/             stand-alone utilities (each also `python -m py3sta.utils.<name>`), e.g. add_warp_xml
 tests/               pytest; scipy/torch tests auto-skip when not installed
 scripts/check_torch.py   GPU vs numpy parity + timing on real data

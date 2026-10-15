@@ -25,9 +25,30 @@ Done:
 
 **Phase 2 — particle alignment (MRA)**, in three parts:
 1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
-2. `03_align` step: `align:` config, stack shift limit, `aligned.star` (`rlnBestReference`, `py3staRefCC`,
-   `py3staAlignAngle`), `align.csv`, pipeline tests.
+2. ✅ `03_align` step (2026-10-15, see below).
 3. MIM019: angles perturbed ±15° recovered (median < 5°), FSC not worse; timing (265 × 2000 < 1 min; full set).
+
+## Phase 2 part 2 — `03_align` step (2026-10-15)
+
+- `align:` in `cycle.yaml`: `enable` (false = poses passed through), `levels`, `max_shift` (Å; null = 2 voxels),
+  `lowpass`, `highpass`, `bin`, `wedge` (constrained CC; needs `wedge.use`), `mask` (null = the 02_reference
+  mask). Validated: levels shape, binned Nyquist, box divisible by bin, shift within the stack allowance.
+- References = `02_reference/references.mrcs` (all of them: multi-reference). Outputs: `aligned.star` (every
+  row of the pose source; active rows get composed poses, `rlnBestReference`, `py3staRefCC`,
+  `py3staAlignAngle`, `py3staAlignShift` (Å), `py3staAlignEdge`; inactive rows 0), `align.csv` (per particle:
+  best reference, CC per reference, angle change, shift xyz Å, edge flag); manifest info with medians,
+  edge count (warning above 10 %), best-reference counts. classify / select / final now start from these poses.
+- **Shift allowance = stack.margin − 2 voxels** (not − 1): a freshly cut crop may already be 0.5 voxel
+  off-centre, so `margin − 1` left no room and every particle failed the drift check. `run` refreshes the stack
+  with this cycle's shift limit first (particles that could leave their crop are re-cropped). MIM019
+  (margin 4, 6.65 Å): up to 2 voxels = 13.3 Å per cycle.
+- `update_particles` helper: writes per-particle columns by `rlnTomoParticleName`; new columns default to 0
+  (no NaN in STAR files).
+- Tests (`test_pipeline_align.py`, chiral object, 16 particles, poses off by ±5° per angle and ±0.8 voxel,
+  torch on CPU): median error 0.41°, one particle 2.2° — it scores higher there than at its true pose (0.9640
+  vs 0.9624), so a limit of the score on this smooth noisy object, not a search miss; excluded rows untouched;
+  `rlnClassNumber` not written; downstream steps use the aligned poses; changing `align.*` makes classify
+  stale; multi-reference (mirror vs true object) → `rlnBestReference` = 2 for all; config errors.
 
 ## Phase 2 part 1 — particle alignment engine, `mra.py` (2026-10-15)
 

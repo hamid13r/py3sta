@@ -90,6 +90,12 @@ class ProjectConfig:
         err.check(self.compute.jobs >= 0, "compute.jobs", f"must be >= 0 (got {self.compute.jobs})")
         err.raise_if_any()
 
+    def align_shift_vox(self, max_shift_A: float | None) -> int:
+        """Alignment shift limit in voxels: max_shift (Å) or 2 voxels, within the stack drift allowance
+        (margin - 2: a fresh crop may already be 0.5 voxel off-centre, see stack.max_drift)."""
+        lim = max(0, self.stack.margin - 2)
+        return min(lim, 2 if max_shift_A is None else int(max_shift_A / self.apix + 1e-6))
+
     @property
     def box_angst(self) -> float:
         return self.box * self.apix
@@ -127,6 +133,19 @@ class ReferenceConfig:
 
 
 @dataclass
+class AlignConfig:
+    enable: bool = True                         # false: poses passed through unchanged
+    levels: typing.List[typing.List[float]] = field(default_factory=lambda: [[12.0, 4.0, 12.0, 4.0], [3.0, 1.0, 3.0, 1.0],
+                                                                             [1.0, 0.5, 1.0, 0.5]])
+    max_shift: typing.Optional[float] = None    # Å per axis (<= stack.margin - 2 voxels); null = 2 voxels
+    lowpass: typing.Optional[float] = 30.0      # Å
+    highpass: typing.Optional[float] = None     # Å
+    bin: int = 1
+    wedge: bool = True                          # constrained CC (needs wedge.use in project.yaml)
+    mask: typing.Optional[MaskConfig] = None    # null: the reference mask (02_reference/mask.mrc)
+
+
+@dataclass
 class ClassifyConfig:
     method: str = "column"                      # column: classes from an integer STAR column (kmeans etc. later)
     column: str = "rlnClassNumber"              # method column; a missing column = one class
@@ -151,6 +170,7 @@ class CycleConfig:
     ctf: CtfConfig = field(default_factory=CtfConfig)  # belongs to the tomograms in 00_input.star
     average: AverageConfig = field(default_factory=AverageConfig)
     reference: ReferenceConfig = field(default_factory=ReferenceConfig)
+    align: AlignConfig = field(default_factory=AlignConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
     select: SelectConfig = field(default_factory=SelectConfig)
     schema: int = SCHEMA
@@ -194,6 +214,29 @@ class CycleConfig:
             if r.lowpass:
                 err.check(r.lowpass >= 2 * project.apix, "reference.lowpass",
                           f"{r.lowpass:g} Å is beyond Nyquist ({2 * project.apix:g} Å)")
+        a = self.align
+        for i, lv in enumerate(a.levels):
+            ok = len(lv) == 4 and all(v >= 0 for v in lv) and lv[0] <= 180 and lv[2] <= 180 \
+                and (lv[0] == 0 or lv[1] > 0) and (lv[2] == 0 or lv[3] > 0)
+            err.check(ok, f"align.levels[{i}]", f"must be [nut, nstep, spin, sstep] (deg, >= 0, steps > 0 when the "
+                      f"range is > 0, ranges <= 180; got {lv})")
+        for key, v in (("lowpass", a.lowpass), ("highpass", a.highpass)):
+            err.check(v is None or v > 0, f"align.{key}", f"must be > 0 Å or null (got {v})")
+        err.check(a.bin >= 1, "align.bin", f"must be >= 1 (got {a.bin})")
+        err.check(a.max_shift is None or a.max_shift >= 0, "align.max_shift", f"must be >= 0 Å or null (got {a.max_shift})")
+        if a.mask is not None:
+            err.choice(a.mask.shape, MASK_SHAPES, "align.mask.shape")
+        if project is not None:
+            lim = (project.stack.margin - 2) * project.apix
+            err.check(a.max_shift is None or a.max_shift <= lim + 1e-6, "align.max_shift",
+                      f"{a.max_shift} Å exceeds the stack drift allowance ({lim:g} Å = stack.margin - 2 voxels); "
+                      "raise stack.margin in project.yaml (rebuilds the stack) or lower align.max_shift")
+            err.check(project.box % a.bin == 0, "align.bin", f"box {project.box} is not divisible by {a.bin}")
+            if a.lowpass:
+                err.check(a.lowpass >= 2 * project.apix * a.bin, "align.lowpass",
+                          f"{a.lowpass:g} Å is beyond Nyquist of the binned search ({2 * project.apix * a.bin:g} Å)")
+            err.check(not a.wedge or project.wedge.use or not a.enable, "align.wedge",
+                      "needs tilt information (wedge.use: true in project.yaml); or set align.wedge: false")
         err.choice(self.classify.method, CLASSIFY_METHODS, "classify.method")
         sel = self.select
         err.check(sel.align == "all" or isinstance(sel.align, list), "select.align",
@@ -222,6 +265,8 @@ class CycleConfig:
         c.reference.mask.soft = _round(0.1 * box)
         c.reference.lowpass = max(30.0, _round(4 * project.apix))
         c.select.lowpass = c.reference.lowpass
+        c.align.lowpass = c.reference.lowpass
+        c.align.wedge = project.wedge.use
         c.select.max_shift = _round(0.1 * box)
         return c
 
@@ -245,6 +290,8 @@ CYCLE_HEADER = """\
 # ctf.mode: none | flip | wiener | amplitude -- belongs to the tomograms in 00_input.star ('py3sta ctf-check')
 # All sizes in Å.  reference.mode: global | file | classes;  mask.shape: sphere | ellipsoid | box | file
 # mask.radius: 1 value (sphere) or 3 (ellipsoid / box half-sizes); reference.invert flips reference files only
+# align: levels [[nut, nstep, spin, sstep], ...] coarse to fine around the current pose (deg); max_shift Å per axis
+#   (<= stack.margin - 2 voxels; larger shifts re-crop more particles next cycle); mask: null = reference mask
 # classify.method: column (classes from classify.column; missing column = one class)
 # select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
 #   target: reference (02_reference, reference 1) or an MRC path; lowpass / highpass / max_shift in Å, step in deg

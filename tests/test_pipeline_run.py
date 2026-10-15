@@ -60,7 +60,8 @@ def proj(tmp_path):
     star = _dataset(tmp_path)
     p = init_project(tmp_path / "proj", star, backend="numpy", jobs=1, margin=3).project
     _edit_yaml(p.cycle_dir(0) / "cycle.yaml", lambda c: (c["reference"]["mask"].update(radius=[60.0], soft=10.0),
-                                                         c["select"].update(step=30.0, bin=1)))
+                                                         c["select"].update(step=30.0, bin=1),
+                                                         c["align"].update(enable=False)))
     return load_project(p.root)
 
 
@@ -246,9 +247,10 @@ def test_status_and_cli(proj):
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "msa", "--to", "msa"])
     assert r.exit_code != 0 and "no implemented step" in r.output
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "final"])
-    assert r.exit_code != 0 and "upstream step select is stale: upstream reference re-run" in r.output
-    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "select"])
+    assert r.exit_code != 0 and "upstream step select is stale" in r.output and "upstream reference re-run" in r.output
+    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "align"])
     assert r.exit_code == 0 and "40 particles, poses from select" in r.output, r.output
+    assert "align disabled: poses passed through" in r.output
     r = CliRunner().invoke(main, ["next", str(proj.root), "cycle-000"])
     assert r.exit_code == 0 and "cycle-001: 40 particles from cycle-000_final.star" in r.output, r.output
     r = CliRunner().invoke(main, ["status", str(proj.root)])

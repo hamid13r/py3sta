@@ -216,6 +216,120 @@ def _particle_block(blocks: dict):
     return blocks["particles"] if "particles" in blocks else next(iter(blocks.values()))
 
 
+# ------------------------------------------------------------------- align
+ALIGN_COLUMNS = ("rlnBestReference", "py3staRefCC", "py3staAlignAngle", "py3staAlignShift", "py3staAlignEdge")
+POSE_COLUMNS = ["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi", "rlnOriginXAngst", "rlnOriginYAngst", "rlnOriginZAngst"]
+
+
+def align_params(p: ProjectConfig, c: CycleConfig) -> dict:
+    return {"align": dataclasses.asdict(c.align), "box": p.box, "apix": p.apix, "ts_apix": p.ts_apix,
+            "invert_contrast": p.invert_contrast, "wedge": dataclasses.asdict(p.wedge),
+            "shift_vox": p.align_shift_vox(c.align.max_shift), "pose_source": _source_name("align")}
+
+
+def update_particles(out, names, values: dict) -> None:
+    """Write per-particle ``values`` {column: array aligned with ``names``} into the rows of table ``out``
+    whose rlnTomoParticleName is in ``names`` (other rows untouched; new columns get 0 there)."""
+    import pandas as pd
+
+    from .project import PARTICLE_NAME
+
+    pos = pd.Series(np.arange(len(out)), index=out[PARTICLE_NAME].astype(str)).loc[list(names)].to_numpy()
+    for col, v in values.items():
+        if col not in out:
+            out[col] = 0
+        out.loc[out.index[pos], col] = np.asarray(v)
+
+
+def run_align(ctx, project, n: int, c: CycleConfig) -> None:
+    """Align every active particle to the reference(s) of 02_reference (mra.py) and compose the result
+    onto its pose -> aligned.star (all rows of the pose source), align.csv. ``enable: false`` passes the
+    poses through unchanged."""
+    import pandas as pd
+
+    from ..io.mrc import read_mrc
+    from ..io.star import read_star, write_star
+    from ..mra import MRASettings, align_particles, cone_grid
+    from ..poses import apply_delta
+    from ..reference import make_mask, resolve_file
+    from ..stack import ParticleStack
+    from ..wedge import TiltInfo
+    from .project import PARTICLE_NAME, load_cycle_input
+
+    p, a = project.config, c.align
+    path, src = pose_star(project, n, "align")
+    ctx.read_star(path)
+    blocks = read_star(path)
+    out = _particle_block(blocks)
+    if not a.enable:
+        write_star(blocks, ctx.output_star("aligned.star"))
+        ctx.info.update(enabled=False, pose_source=src)
+        ctx.log("align disabled: poses passed through")
+        return
+    cin = load_cycle_input(project, n, path)
+    ctx.use_files(cin.tomograms.values(), "tomogram")
+    ref_dir = project.cycle_dir(n) / get_step("reference").folder
+    refs = np.array(read_mrc(ref_dir / "references.mrcs", mmap=False)[0]).reshape(-1, p.box, p.box, p.box)
+    if a.mask is None:
+        mask = read_mrc(ref_dir / "mask.mrc", mmap=False)[0]
+    else:
+        m = a.mask
+        mf = None
+        if m.shape == "file":
+            mf = resolve_file(m.file, project.root)
+            ctx.use_files([mf], "mask")
+        mask = make_mask(p.box, p.apix, m.shape, m.radius, m.soft, m.center, mf)
+    tilts = None
+    if a.wedge:
+        ctx.use_files(cin.tilt_files.values(), "tilt file")
+        sign = None if p.wedge.sign == "auto" else float(p.wedge.sign)
+        tilts = {t: TiltInfo.from_warp_xml(f, sign) for t, f in cin.tilt_files.items()}
+    settings = MRASettings(levels=[list(map(float, lv)) for lv in a.levels], max_shift=p.align_shift_vox(a.max_shift),
+                           lowpass=a.lowpass, highpass=a.highpass, bin=a.bin, wedge=a.wedge)
+    device, label = resolve_device(p.compute)
+    if device is None:
+        ctx.warn("align runs on the numpy reference implementation (slow); set compute.backend: torch")
+    nrot = sum(len(cone_grid(*lv).mats) for lv in settings.levels)
+    ps = cin.particles
+    ctx.log(f"aligning {len(ps)} particles to {len(refs)} reference(s): {nrot} rotations per reference, "
+            f"shift <= {settings.max_shift} voxel(s), bin {a.bin}, {'constrained' if tilts else 'plain'} CC; {label}")
+    step = max(1, len(ps) // 10)
+    last = [0]
+
+    def progress(done, total):
+        if done - last[0] >= step or done == total:
+            last[0] = done
+            ctx.log(f"  {done}/{total}")
+
+    res = align_particles(ps, ParticleStack.open(project.stack_dir), refs, mask, p.apix, settings, tilts,
+                          invert=p.invert_contrast, device=device, progress=progress)
+    new = apply_delta(ps, res.R, res.t, p.apix)
+    names = ps.df[PARTICLE_NAME].astype(str).to_numpy()
+    shift_A = np.linalg.norm(res.t, axis=1) * p.apix
+    update_particles(out, names, {**{col: new.df[col].to_numpy() for col in POSE_COLUMNS},
+                                  "rlnBestReference": res.best_ref, "py3staRefCC": np.round(res.cc, 5),
+                                  "py3staAlignAngle": np.round(res.angle, 3), "py3staAlignShift": np.round(shift_A, 3),
+                                  "py3staAlignEdge": res.at_edge.astype(int)})
+    write_star(blocks, ctx.output_star("aligned.star"))
+    table = pd.DataFrame({PARTICLE_NAME: names, "rlnTomoName": ps.df["rlnTomoName"].to_numpy(),
+                          "best_reference": res.best_ref, "cc": res.cc, "angle_deg": res.angle,
+                          "shift_x_A": res.t[:, 0] * p.apix, "shift_y_A": res.t[:, 1] * p.apix,
+                          "shift_z_A": res.t[:, 2] * p.apix, "at_edge": res.at_edge.astype(int)})
+    for k in range(res.cc_ref.shape[1]):
+        table[f"cc_ref{k + 1}"] = res.cc_ref[:, k]
+    table.to_csv(ctx.output("align.csv"), index=False, float_format="%.4f")
+    n_edge = int(res.at_edge.sum())
+    counts = {str(k + 1): int((res.best_ref == k + 1).sum()) for k in range(len(refs))}
+    ctx.info.update(enabled=True, n_aligned=len(ps), pose_source=src, n_rotations=nrot,
+                    angle_median=round(float(np.median(res.angle)), 2), shift_median_A=round(float(np.median(shift_A)), 2),
+                    cc_median=round(float(np.median(res.cc)), 4), n_at_edge=n_edge, best_reference_counts=counts)
+    ctx.log(f"median change {np.median(res.angle):.2f}°, {np.median(shift_A):.2f} Å; median CC {np.median(res.cc):.3f}; "
+            f"at the search edge: {n_edge}" + (f"; best reference counts {counts}" if len(refs) > 1 else ""))
+    if n_edge > 0.1 * len(ps):
+        ctx.warn(f"{n_edge} of {len(ps)} particles at the edge of the search (first level range or shift limit): "
+                 "widen align.levels[0] / align.max_shift")
+
+
 # ---------------------------------------------------------------- classify
 CLASS_COLUMN = "py3staClass"
 
@@ -429,7 +543,8 @@ def run_final(ctx, project, n: int, c: CycleConfig) -> None:
 STEPS: tuple[Step, ...] = (
     Step("average", "01_average", (), average_params, run_average),
     Step("reference", "02_reference", reference_upstream, reference_params, run_reference),
-    Step("align", "03_align", ("reference",), poses="aligned.star"),
+    Step("align", "03_align", _with_pose_source("align", ("reference",)), align_params, run_align,
+         poses="aligned.star"),
     Step("msa", "04_msa", ("align",)),
     Step("classify", "05_classify", _with_pose_source("classify", classify_upstream), classify_params, run_classify),
     Step("embed", "06_embed", ("classify",)),
