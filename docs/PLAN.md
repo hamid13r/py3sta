@@ -12,20 +12,22 @@ real data (MIM019) and synthetic tests.
 
 ```
 project/
-  project.yaml               # tomogram sets (+ CTF mode per set), box, pixel size, wedge, device, jobs
+  project.yaml               # box, pixel sizes, wedge, stack margin, device, jobs
   input.star                 # starting particles (rlnMicrographName -> tomogram, rlnWarpXMLfile -> tilts/CTF)
+  stack/                     # raw unrotated crops, shared by all cycles (see "Particle stack")
+    stack.mrcs               # float16, one row per particle, crop = box + 2*margin
+    stack.star               # row <-> particle, crop centre (integer voxels), tomogram path + size/mtime
   cycle-000/
-    cycle.yaml               # parameters of this cycle (copied from previous cycle by `next`, then edited)
-    00_input.star            # = previous cycle's _final.star (cycle 0: input.star)
-    01_average/              # global average, half maps, FSC
+    cycle.yaml               # parameters of this cycle incl. CTF mode (copied by `next`, then edited)
+    00_input.star            # COPY of the previous cycle's _final.star (cycle 0: input.star); editable
+    01_average/              # global average from the stack (pose applied: one interpolation), half maps, FSC, per-tomogram CC
     02_reference/            # references.mrcs + references.star (1..N references)
-    03_stack/                # stack.mrcs (+ optional binned msa_stack.mrcs) + stack.star
-    04_align/                # aligned.star (optional MRA)
-    05_msa/                  # eigenvolumes, scree, scores.npy (+ score columns in star)
-    06_classify/             # class_K004.star ... (one per K and method), class averages, counts, dendrogram
-    07_embed/                # UMAP/t-SNE embeddings, user-drawn selections (lasso groups)
-    08_select/               # selection.yaml (chosen K / groups, per-class action + target), class-average alignment
-    cycle-000_final.star     # becomes cycle-001/00_input.star
+    03_align/                # aligned.star (optional MRA; reference rotated, particles in tomogram frame)
+    04_msa/                  # rotated/masked/binned MSA stack, eigenvolumes, scree, scores
+    05_classify/             # class_K004.star ... (one per K and method), class averages, counts, dendrogram
+    06_embed/                # UMAP/t-SNE embeddings, user-drawn selections (lasso groups)
+    07_select/               # selection.yaml (chosen K / groups, per-class action + target), class-average alignment
+    cycle-000_final.star     # copied to cycle-001/00_input.star by `next`
 ```
 
 - Every step reads only its upstream outputs and writes its own folder + `manifest.json`
@@ -33,11 +35,16 @@ project/
   running/done/failed). Re-running a step overwrites its folder and marks downstream steps stale.
   `py3sta status` shows done / stale / missing / running / failed / edited.
 - Config: YAML, validated (dataclasses + explicit checks), clear error messages, units in Å.
+- Running a step whose upstream is stale / missing / failed is refused with a hint
+  (`run --from <upstream>`), unless `--force` (decided 2026-10-15).
+- Tomogram paths live only in the STAR file (`rlnMicrographName`); to switch reconstructions (raw WBP →
+  novaCTF) edit the cycle's `00_input.star` (helper: `py3sta set-tomograms in.star DIR -o out.star`,
+  matching by `tomo_key()`). The CTF mode belongs to the reconstruction and is set in `cycle.yaml`.
 
 ### Staleness and change tracking (decided 2026-10-15)
 
 - **Parameters:** each manifest stores its slice of `cycle.yaml` / `project.yaml`; any difference → stale.
-- **Binary outputs between steps** (`stack.mrcs`, MRCs): run ids. A step records the run id of each
+- **Binary outputs between steps** (MRCs, MSA stacks): run ids. A step records the run id of each
   upstream step it used; upstream re-run → new id → downstream stale. No hashing of large files.
 - **STAR files are user-editable.** Writer and readers record a fingerprint (size, mtime, sha1; the hash
   is computed only when size/mtime changed, so `touch`/copy is not an edit).
@@ -45,79 +52,74 @@ project/
   - An edited STAR is re-validated (parses, required columns) before the next step uses it.
   - Re-running a step whose STAR output was edited needs `--force`; the edited version is first saved as
     `<name>.edited-<date>.star`. Edits are never lost silently.
-  - `00_input.star` is a link (to `input.star` or the previous `_final.star`): editing it edits the target.
-    To edit one cycle only, replace the link by a copy; `status` shows link vs copy.
+  - `00_input.star` is a copy (not a link), so editing it never changes an upstream cycle.
   - `py3sta flag` is just a recorded STAR edit.
-- **External files** (tomograms, Warp XML, reference/mask MRCs, `input.star`): size + mtime.
+- **External files** (tomograms, Warp XML, reference/mask MRCs, `input.star`): size + mtime. A
+  different file at the same tomogram path → those crops are re-made and the cycle's steps are stale.
+- **Compute settings** (backend, GPU, jobs) are not parameters: numpy and torch agree to ~1e-6.
 - **Files changed during a run:** a step re-checks the size/mtime of its tomograms at the end; a change →
   `failed: tomogram X changed during the run` (memmapped reads may have mixed old and new data).
 
-### Tomogram sets (decided 2026-10-15)
+### Particle stack (decided 2026-10-15)
 
-The tomogram source can change between cycles (e.g. raw WBP → novaCTF), and the CTF mode belongs to
-the reconstruction, so both move from the project level into named sets:
+Raw, **unrotated** crops around each particle; the pose is applied by each consumer, so there is exactly
+one interpolation in the whole pipeline (i3 pre-rotates and interpolates twice after alignment; trilinear
+keeps ~80 % amplitude per pass at half Nyquist, ~27 Å on MIM019).
 
-```yaml
-# project.yaml
-tomograms:
-  warp:    {from: star, ctf: amplitude}           # rlnMicrographName
-  novactf: {files: /data/.../nova/*.mrc, ctf: none}
-  etomo:   {files: /data/.../etomo/, ctf: flip}
-# cycle.yaml
-tomograms: novactf                                  # default: the set chosen at init
-```
-
-- Files are matched to particles by `tomo_key()` (folder or glob, as `add-xml`). Wedge and per-tilt
-  defocus still come from the Warp XML (same tilt series).
-- `py3sta tomo-set add NAME --files ... --ctf MODE`: every tomogram in `input.star` must have a file;
-  voxel size must equal the project's (box is in voxels; other binnings need a box in Å — later).
-- The set name + its files' size/mtime are step parameters: switching sets, or replacing one tomogram
-  file, makes only the current cycle's average/stack stale; `status` names the changed tomogram.
-- A replaced tomogram with a different volume size/origin → warning (coordinates may not fit a new
-  tilt-series alignment). The average step records **per-tomogram CC with the reference**; `status` flags
-  a tomogram whose CC drops sharply (catches a misaligned replacement).
-- Later: re-extract only changed tomograms into the stack; `py3sta compare CYCLE --tomograms a,b`
-  (same poses, FSC + CC per set); `py3sta add-particles` for new tomograms (`py3staAddedCycle`).
+- Integer-voxel crops (plain slicing, no interpolation); the sub-voxel remainder of the centre is applied
+  together with the rotation. float16 (decided; check vs float32 on MIM019).
+- Crop = box + 2·margin (default margin 4 voxels; MIM019: 80³ → 6.2 GB for 6081 particles vs 4.5 GB at 72³).
+  Rotating a box-sized region fills only the inscribed sphere: corners are treated as missing (masks are
+  inside the box anyway), like particles at the tomogram edge.
+- Project-level and shared by all cycles. Pose changes never make it stale. A crop is re-made only when
+  (a) its tomogram path or file changed (STAR edit / new reconstruction), or (b) the particle drifted:
+  before a cycle runs, every particle whose |centre − crop centre| + next shift limit > margin is
+  re-cropped around its current centre (rows rewritten in place; ~1 ms each). `status` reports counts;
+  large drift is also listed as a quality signal (particles sliding onto neighbours / membrane).
+- Alignment's translation limit must be ≤ margin (config validation), so no particle leaves its crop
+  during a step.
+- Alignment compares the reference rotated by each pose with the unrotated crop (wedge fixed per
+  tomogram in this frame). MSA builds its own rotated, masked, binned stack from the crops per cycle
+  (one interpolation; i3 `MSAIMGSIZE`).
 
 ## 2. Steps of one cycle
 
-1. **Average** — existing `average_particles` on `00_input.star` (wedge, dose, CTF per config).
+0. **Stack refresh** (project level, before each cycle) — create `stack/` or re-crop changed/drifted particles.
+1. **Average** — poses of `00_input.star` applied to the crops (wedge, dose, CTF per `cycle.yaml`);
+   half maps, FSC, per-tomogram CC (each tomogram's average vs the others', flags outliers).
 2. **Reference(s)** — mode `global` | `classes` (selected class averages of previous cycle) | `file` (one or
    more MRCs). Masked (sphere/ellipsoid/box/file, soft edge) and band-passed (Å) → reference stack.
    Multi-reference = N > 1.
-3. **Stack** — extract every particle once, pre-rotated/shifted by its current pose → memory-mapped
-   `stack.mrcs` (float16 default) + `stack.star` (row ↔ particle). All later steps read the stack (as i3),
-   so alignment searches small deltas around identity. Wedge/CTF weights are recomputed from geometry.
-   Optional smaller/binned MSA stack (i3 `MSAIMGSIZE`).
-4. **Align (optional MRA)** — stack vs reference(s); result = delta pose composed onto current pose →
-   `aligned.star`. Can be disabled (translation-only or skip, like i3 practice).
-5. **MSA / dimensionality reduction**
+3. **Align (optional MRA)** — crops vs reference(s) rotated by each pose, searching small deltas around the
+   current pose; result = delta pose composed onto current pose → `aligned.star`. Can be disabled
+   (translation-only or skip, like i3 practice).
+4. **MSA / dimensionality reduction** — on a per-cycle rotated, masked, binned MSA stack made from the crops.
    - **PCA** (randomized SVD, GPU): masked, band-passed stack; default *wedge-masked differences*
      (particle − wedge-applied average) so missing-wedge factors disappear; plain PCA available for i3 parity.
    - Outputs: eigenvolumes (montage + MRC), scree plot, per-particle scores (`py3staPC1..n` columns + `.npy`).
-6. **Classification** — on chosen factors (i3 `CLSFACT`), for a list of K:
+5. **Classification** — on chosen factors (i3 `CLSFACT`), for a list of K:
    - **k-means** (GPU), **Ward hierarchical** (i3 parity, dendrogram), **GMM** (BIC suggestion), HDBSCAN later.
    - Per K: `class_K###.star`, wedge-weighted class averages, counts, montage, dendrogram.
    - Stability score (bootstrap ARI) per K to flag noise-driven classes.
-7. **Embedding + interactive selection (UMAP)**
+6. **Embedding + interactive selection (UMAP)**
    - **UMAP** (umap-learn; cuML if available) and t-SNE on the top PCA scores → 2D coordinates per particle.
    - **Interactive explorer** `py3sta explore cycle-000`: scatter plot of UMAP (or any two PCs), coloured by
      k-means class / PC score / CC / tomogram; **draw lasso/polygon regions to define particle groups**;
-     groups are saved to `07_embed/groups.json` and become a "classification" like any K
+     groups are saved to `06_embed/groups.json` and become a "classification" like any K
      (`class_lasso.star`), usable in `select`.
    - v1: self-contained HTML (plotly.js lasso, data embedded, no server) → "Export groups" writes JSON.
    - v2: local server (FastAPI/Dash) that computes the class average of a drawn group live (GPU) and can
      push it to ChimeraX (REST `remotecontrol`), plus eigenvolume slider views.
-8. **Select + align class averages** — `py3sta select`:
+7. **Select + align class averages** — `py3sta select`:
    - choose a classification (a K, a method, or the lasso groups),
    - per class: `align` | `leave` | `exclude`,
    - targets: aligned classes **to each other** (exhaustive search among them, then refine against their
      running average) or **to a reference MRC**; targets can be mixed per class group,
    - class transforms are composed onto every member's pose; `leave` keeps poses;
    - `exclude` sets `py3staExcluded = 1` on the members (see "Excluded particles" below).
-9. **Final** — `cycle-NNN_final.star`: new angles/origins (RELION 4), `rlnClassNumber`, `py3staCycle`,
+8. **Final** — `cycle-NNN_final.star`: new angles/origins (RELION 4), `rlnClassNumber`, `py3staCycle`,
    scores; summary report.
-10. **Next** — `py3sta next` creates `cycle-NNN+1/`, copies `cycle.yaml`, links `00_input.star`.
+9. **Next** — `py3sta next` creates `cycle-NNN+1/`, copies `cycle.yaml`, links `00_input.star`.
 
 ### Excluded particles
 
@@ -133,7 +135,7 @@ tomograms: novactf                                  # default: the set chosen at
 
 ```
 py3sta init    project/ --star input.star --box 72
-py3sta run     cycle-000 [--from stack] [--to classify]
+py3sta run     cycle-000 [--from average] [--to classify]
 py3sta explore cycle-000                      # UMAP / PCA scatter, lasso groups
 py3sta select  cycle-000 --use kmeans:6 --align 1,2,4 --leave 3 --exclude 5 --target each   # or --target ref.mrc
 py3sta select  cycle-000 --use lasso --align all --target each
@@ -210,7 +212,7 @@ tunnel (`ssh -L 8050:localhost:8050 workstation`).
 | Phase | Content | Acceptance |
 |---|---|---|
 | 0 ✅ | I/O, converters, extraction, wedge/dose/CTF averaging, parallel CPU, torch mirror | see PROGRESS.md |
-| 1 | Pipeline skeleton: project/cycle dirs, configs, manifests, status, references (global/file), stack, pose composition, `_final.star`, `next`; dummy classification from existing `rlnClassNumber` | stack from `final.star` == stack from original; synthetic class transforms recovered exactly |
+| 1 | Pipeline skeleton: project/cycle dirs, configs, manifests, status, references (global/file), stack, pose composition, `_final.star`, `next`; dummy classification from existing `rlnClassNumber` | average from the stack == average from the tomograms (float16 vs float32 measured); only changed/drifted particles re-cropped; synthetic class transforms recovered exactly |
 | 2 | Alignment engine (CPU + GPU), MRA step | MIM019 angles perturbed ±15° recovered (median < 5°), FSC not worse; 265 ptcl × 2000 orientations < 1 min on GPU |
 | 3 | PCA (wedge-masked differences + plain), k-means, Ward, GMM, multi-K outputs | synthetic 2-state data separated; wedge factors absent |
 | 4 | UMAP + `explore` (static HTML lasso → groups.json → class_lasso.star) | groups round-trip into `select`; lasso on synthetic data reproduces true classes |
@@ -220,6 +222,5 @@ tunnel (`ssh -L 8050:localhost:8050 workstation`).
 
 ## 6. Open questions (ask the user)
 
-- Stack precision default (float16 vs float32) once real dataset sizes are known.
 - Reference for class-average alignment when `each`: best-SNR class vs running average (default: running average).
 - Dashboard framework: Dash (default) vs FastAPI + custom JS; multi-user needs on shared workstations?

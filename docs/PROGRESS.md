@@ -9,18 +9,15 @@ Update at the end of every work session: move items, add findings with numbers, 
 Done:
 1. ✅ `project.yaml` / `cycle.yaml` schema + loader with validation; `py3sta init` (2026-10-14, see below).
 
-Next concrete tasks:
-1b. Tomogram sets (PLAN.md §1): move `ctf` from project level into named sets; `cycle.yaml: tomograms:`;
-    `py3sta tomo-set add`. Small change to task 1's config — do before task 2.
-2. Cycle folder + `manifest.json` + `py3sta status` (done / stale / missing / running / failed / edited);
-   run ids between steps, fingerprints for user-editable STAR files, size/mtime for external files,
-   tomogram re-check at the end of a run, `--force` + backup when re-running over an edited STAR
-   (PLAN.md §1 "Staleness and change tracking"). Wire the existing average in as step 01, with per-tomogram CC.
+Next concrete tasks (revised 2026-10-15, see PLAN.md §1 for the decisions):
+2. Manifests + `py3sta status` + `py3sta run`; CTF mode moves from `project.yaml` to `cycle.yaml`;
+   `00_input.star` becomes a copy; project-level unrotated stack (create + incremental re-crop);
+   `01_average` from the stack (one interpolation, per-tomogram CC).
 3. Reference step (global, file) with masks + band-pass in Å.
-4. Stack step: pre-rotated `stack.mrcs` (float16) + `stack.star`, CPU multiprocess + torch.
-5. Pose composition function + synthetic tests; `_final.star` writer; `py3sta next`.
-6. Dummy classification from existing `rlnClassNumber` to run select/final end-to-end before the real engines exist.
-7. `py3staExcluded` column: honoured by every step from the start (average already needs a filter), `py3sta flag`.
+4. Pose composition function + synthetic tests; `_final.star` writer; `py3sta next` (copies 00_input).
+5. Dummy classification from existing `rlnClassNumber` to run select/final end-to-end before the real engines exist.
+6. `py3staExcluded` column: honoured by every step from the start, `py3sta flag`.
+7. `py3sta set-tomograms` STAR helper (swap reconstructions by `tomo_key()`).
 
 ## Done (Phase 0)
 
@@ -56,7 +53,13 @@ Next concrete tasks:
 
 - (2026-10-15) No content hashing of large files: run ids between steps, size/mtime for external files.
   STAR files stay user-editable: fingerprinted (hash only when size/mtime changed), edits tracked, never lost.
-- (2026-10-15) Tomogram source is chosen per cycle from named tomogram sets, each with its own CTF mode.
+- (2026-10-15) No tomogram sets: tomogram paths live only in the STAR file (edit `00_input.star` to switch
+  reconstructions); the CTF mode moves to `cycle.yaml`. `00_input.star` is a copy, not a link.
+- (2026-10-15) Running a step with a stale/missing/failed upstream is refused unless `--force`.
+- (2026-10-15) Stack = raw **unrotated** float16 crops (box + 2·margin, margin 4 voxels), project-level,
+  shared by all cycles; the pose is applied by each consumer → one interpolation in the whole pipeline.
+  Re-crop only on tomogram change or drift beyond the margin; alignment shift limit ≤ margin.
+  Step order: average → reference → align → msa → classify → embed → select.
 
 - Package/CLI name `py3sta` (GitHub `hamid13r/py3sta`); renaming later is cheap (SAGA was the favourite alternative).
 - RELION 4 particle format; Warp export via minimal STAR (`star2warp`).
