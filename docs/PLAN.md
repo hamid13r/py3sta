@@ -96,8 +96,8 @@ keeps ~80 % amplitude per pass at half Nyquist, ~27 Å on MIM019).
    CC warns about inverted contrast). Multi-reference = N > 1; full maps (no half-set references, decided).
 3. **Align (optional MRA)** — crops vs reference(s) rotated by each pose, searching small deltas around the
    current pose; result = delta pose composed onto current pose → `aligned.star`. With N references every
-   particle is aligned to all of them and keeps the best CC (reference index → `rlnClassNumber`, score →
-   `py3staRefCC`). Can be disabled (translation-only or skip, like i3 practice).
+   particle is aligned to all of them and keeps the best CC (reference index → `rlnBestReference`, score →
+   `py3staRefCC`; `rlnClassNumber` stays for classification). Can be disabled (translation-only or skip, like i3 practice).
 4. **MSA / dimensionality reduction** — on a per-cycle rotated, masked, binned MSA stack made from the crops.
    - **PCA** (randomized SVD, GPU): masked, band-passed stack; default *wedge-masked differences*
      (particle − wedge-applied average) so missing-wedge factors disappear; plain PCA available for i3 parity.

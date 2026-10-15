@@ -23,7 +23,38 @@ Done:
 6. ✅ `py3sta flag` (2026-10-15, see below). Task 7 (`set-tomograms` helper) dropped by the user: tomogram
    paths live in the STAR file and are edited there.
 
-Next: Phase 2 particle alignment (MRA, `03_align`) — see PLAN.md §2 step 3 and §3.
+**Phase 2 — particle alignment (MRA)**, in three parts:
+1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
+2. `03_align` step: `align:` config, stack shift limit, `aligned.star` (`rlnBestReference`, `py3staRefCC`,
+   `py3staAlignAngle`), `align.csv`, pipeline tests.
+3. MIM019: angles perturbed ±15° recovered (median < 5°), FSC not worse; timing (265 × 2000 < 1 min; full set).
+
+## Phase 2 part 1 — particle alignment engine, `mra.py` (2026-10-15)
+
+- Scoring in the reference frame: trial pose M' = D·M, particle sampled from its unrotated stack crop at M'
+  (one interpolation), masked Pearson CC with the reference over all shifts (align.py's Fixed / ncc_map
+  core); result (D, t) composes with poses.py. Band-pass applied once per crop; `bin` samples every b-th
+  voxel of the (low-passed) crop and Fourier-resamples references + mask.
+- Search: i3 levels `[nut, nstep, spin, sstep]` (`cone_grid`: z axis tilted ≤ nut, spin ±spin), coarse to
+  fine around the current pose; each reference searched separately, best CC wins (`best_ref`, `cc_ref`).
+  Flags particles whose best pose is on the border of the first level or at the shift limit (`at_edge`).
+- Two findings while testing on the chiral object (wedge ±50°, poses off by up to 15° and 1.5 voxels):
+  1. **Integer shifts bias the rotation**: a few degrees of rotation mimic half a voxel of shift, so the
+     search preferred wrong rotations (CC at truth 0.967 < found 0.972). Fix: after every level the particle
+     is re-centred on the sub-voxel peak (parabola), and the final shift is converged at the best rotation.
+  2. **Filtering only the reference with the wedge made the score erratic** (±2° around the truth scored
+     0.974 / 0.976 non-monotonically). Fix: the sampled particle gets the same rotated coverage filter, so
+     both maps share exactly the same Fourier support → clean peak at the truth.
+  3. Level coverage: each level's range must cover the previous step (5° → ±2° left gaps; 5° → 2° → 0.5° works).
+     Default levels: `[[12, 4, 12, 4], [3, 1, 3, 1], [1, 0.5, 1, 0.5]]`.
+- Tests (`test_mra.py`): cone grid geometry; torch == numpy scores (2e-4, identical shifts; wedge on/off,
+  bin 1/2); numpy driver == torch driver; recovery; constrained beats plain; multi-reference (object vs
+  its mirror: every particle picks its own); edge flag.
+
+| synthetic recovery (8 particles, wedge ±50°, perturbation median 6.9°, max 15.3°) | angle error median / max | shift max |
+|---|---|---|
+| constrained CC | **0.83° / 1.00°** | 0.07 voxel |
+| plain CC | 2.14° / 3.56° | 0.10 voxel |
 
 ## Phase 1 task 6 — `py3sta flag` (2026-10-15)
 
@@ -234,6 +265,9 @@ Files: `data/align_test/` (B/compare_emdb.png shows the fit). EMDB map: `data/em
 
 ## Decisions
 
+- (2026-10-15) Multi-reference alignment writes the winning reference to **`rlnBestReference`** (user's
+  choice of name; not a RELION label) and its CC to `py3staRefCC`; `rlnClassNumber` stays reserved for
+  classification.
 - (2026-10-15) Class selection lives in the `select:` section of `cycle.yaml` (tracked like every parameter);
   the planned `py3sta select` CLI / dashboard will only write that section. `target: each` comes in Phase 5.
 - (2026-10-15) No automatic fitting of `file` references (no `reference.fit`): the user aligns external maps

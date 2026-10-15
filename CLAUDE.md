@@ -18,6 +18,7 @@ src/py3sta/
   average.py         extract (trilinear), average_particles (multiprocess, wedge/dose/CTF Wiener), fsc, path resolution
   backend_torch.py   PyTorch/CUDA mirror of extract/wedge/average (must stay numerically equal to numpy)
   poses.py           pose composition: delta (R, t) in the reference frame -> M' = R M, c' = c + M'.T t
+  mra.py             particle alignment: cone/spin levels, constrained CC (wedge on both maps), best reference
   align.py           map-to-map alignment: resample, SO(3) grid, masked CC over shifts (numpy + torch), polish, mirror
   reference.py       masks (sphere/ellipsoid/box/file, soft edges in Å), band-pass, fit_box, prepare_reference
   stack.py           project particle stack: unrotated float16 crops, refresh_stack (new / tomogram changed / drift)
@@ -78,7 +79,7 @@ python scripts/check_torch.py STAR TOMO --tilt XML --gpu 0
 - Keep the CLI thin: logic lives in modules, CLI only parses, resolves files and reports. The planned
   dashboard (PLAN.md §4) must call the same module API, so never put processing logic in CLI or GUI code.
 - New per-particle columns: use `rln*` names only when they mean exactly the RELION label; otherwise `py3sta*`
-  (exception: `rlnWarpXMLfile`, chosen by the user).
+  (exceptions chosen by the user: `rlnWarpXMLfile`, `rlnBestReference`).
 - Git: small commits with clear messages; never commit `data/`, MRC files or caches.
 
 ## Test data (local, not in git)
