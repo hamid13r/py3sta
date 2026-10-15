@@ -137,7 +137,7 @@ class AlignConfig:
     enable: bool = True                         # false: poses passed through unchanged
     levels: typing.List[typing.List[float]] = field(default_factory=lambda: [[12.0, 4.0, 12.0, 4.0], [3.0, 1.0, 3.0, 1.0],
                                                                              [1.0, 0.5, 1.0, 0.5]])
-    max_shift: typing.Optional[float] = None    # Å per axis (<= stack.margin - 2 voxels); null = 2 voxels
+    max_shift: typing.Optional[float] = None    # Å per tomogram axis (<= stack.margin - 2 voxels); null = 2 voxels
     lowpass: typing.Optional[float] = 30.0      # Å
     highpass: typing.Optional[float] = None     # Å
     bin: int = 1

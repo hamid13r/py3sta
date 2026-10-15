@@ -163,3 +163,12 @@ def test_edge_flag(device):
     s = MRASettings(levels=[[4.0, 2.0, 4.0, 2.0]], max_shift=3, lowpass=12.0, bin=2)
     res = align_particles(given, stack, chiral_object()[None], MASK, APIX, s, device=device)
     assert res.at_edge.all()
+
+
+def test_shift_limit_per_tomogram_axis(device):
+    """Total displacement stays within max_shift along every tomogram axis (the stack crop allowance)."""
+    stack, given, true = _scene(n=4, wedge=False, max_err=2.0, max_shift=3.0, seed=13)
+    s = MRASettings(levels=[[2.0, 1.0, 2.0, 1.0]], max_shift=1, lowpass=12.0, bin=2)
+    res = align_particles(given, stack, chiral_object()[None], MASK, APIX, s, device=device)
+    moved = np.einsum("nji,nj->ni", np.einsum("nij,njk->nik", res.R, given.matrices), res.t)    # M'.T t
+    assert np.abs(moved).max() <= 1 + 1e-6 and res.at_edge.any()

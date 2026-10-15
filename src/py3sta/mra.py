@@ -80,7 +80,7 @@ def cone_grid(nut: float, nstep: float, spin: float, sstep: float) -> ConeGrid:
 @dataclass
 class MRASettings:
     levels: list = field(default_factory=lambda: [[12.0, 4.0, 12.0, 4.0], [3.0, 1.0, 3.0, 1.0], [1.0, 0.5, 1.0, 0.5]])
-    max_shift: int = 3                      # voxels at full sampling, per axis
+    max_shift: int = 3                      # voxels at full sampling, per tomogram axis
     lowpass: float | None = 30.0            # Å
     highpass: float | None = None           # Å
     bin: int = 1
@@ -270,7 +270,8 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
 
     After every level the particle is re-centred on the sub-voxel correlation peak, so the next level's
     rotations are compared without a fractional-shift bias (a few degrees of rotation can otherwise mimic
-    half a voxel of shift). The total shift is kept within ``max_shift`` per axis (reference frame)."""
+    half a voxel of shift). The total shift is kept within ``max_shift`` voxels per tomogram axis (the
+    stack crop allowance)."""
     pr = prepare(refs, mask, apix, settings)
     loc = stack.locate(ps, shift_limit=settings.max_shift)
     grids = [cone_grid(*lv) for lv in settings.levels] or [cone_grid(0, 0, 0, 0)]
@@ -323,9 +324,11 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
                 hit = np.zeros(P, bool)
                 for p in range(P):
                     cc[p], t_sub, _ = best_shift(fx_peak, maps[p])
-                    d = M[p] @ (cen[p] + M[p].T @ (t_sub * pr.bin) - centres[ids[p]])   # total, reference frame
+                    # total displacement, clipped per TOMOGRAM axis: the stack crop allowance is per tomogram
+                    # axis (a ±lim cube in the reference frame reaches lim·√3 along a tomogram axis)
+                    d = cen[p] + M[p].T @ (t_sub * pr.bin) - centres[ids[p]]
                     hit[p] = lim > 0 and np.any(np.abs(d) >= lim - 1e-3)               # clipped at the limit
-                    new[p] = centres[ids[p]] + M[p].T @ np.clip(d, -lim, lim)
+                    new[p] = centres[ids[p]] + np.clip(d, -lim, lim)
                 return cc, new, hit
 
             for r in range(nref):
