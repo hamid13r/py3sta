@@ -116,6 +116,51 @@ def run(project_dir, cycle, start, stop, force):
         raise click.ClickException(str(e))
 
 
+@main.command("align-maps")
+@click.argument("fixed")
+@click.argument("moving", nargs=-1, required=True)
+@click.option("-o", "--out-dir", default="aligned_maps", show_default=True)
+@click.option("--mask", "mask_file", help="Mask MRC in the fixed map's box (default: soft sphere, 40 % of the box).")
+@click.option("--mask-radius", type=float, help="Sphere mask radius (Å).")
+@click.option("--mask-soft", type=float, help="Soft edge width (Å).")
+@click.option("--lowpass", type=float, default=30.0, show_default=True, help="Low-pass for the search (Å).")
+@click.option("--highpass", type=float, help="High-pass for the search (Å).")
+@click.option("--bin", "bin_factor", type=int, default=2, show_default=True, help="Binning for the global search.")
+@click.option("--step", type=float, default=10.0, show_default=True, help="Global angular step (deg).")
+@click.option("--max-shift", type=float, default=30.0, show_default=True, help="Shift search range (Å).")
+@click.option("--polish/--no-polish", default=True, show_default=True,
+              help="Refine rotation + sub-voxel shift continuously (Nelder-Mead) after the grid search.")
+@click.option("--no-mirror", is_flag=True, help="Do not search the mirrored map (hand check).")
+@click.option("--invert", is_flag=True, help="Flip the contrast of the moving maps.")
+@click.option("--center", is_flag=True, help="Centre the moving maps on their density (centre of mass) first.")
+@click.option("--backend", type=click.Choice(["numpy", "torch"]), default="torch", show_default=True)
+@click.option("--gpu", default="0", show_default=True, help="GPU index, or 'cpu' (torch backend).")
+def align_maps_cmd(fixed, moving, out_dir, mask_file, mask_radius, mask_soft, lowpass, highpass, bin_factor, step,
+                   max_shift, polish, no_mirror, invert, center, backend, gpu):
+    """Align MOVING map(s) onto FIXED: global rotation + shift search, optional mirror, polish.
+
+    Moving maps are resampled to the fixed map's voxel size and box (EMDB maps work directly).
+    Writes <name>_aligned.mrc, <name>_fsc.txt and alignment.star (RELION angles = pose of the fixed
+    structure in the moving map, shift in Å)."""
+    from types import SimpleNamespace
+
+    from .align import align_map_files
+    from .pipeline.steps import resolve_device
+
+    try:
+        device, label = resolve_device(SimpleNamespace(backend=backend, gpu=gpu if gpu == "cpu" else int(gpu), jobs=0))
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"device: {label}")
+    try:
+        align_map_files(fixed, moving, out_dir, mask_file, mask_radius, mask_soft, invert, center, device,
+                        log=click.echo, lowpass=lowpass, highpass=highpass, bin_factor=bin_factor, step=step,
+                        max_shift_A=max_shift, polish=polish, try_mirror=not no_mirror)
+    except (ValueError, FileNotFoundError, NotImplementedError) as e:
+        raise click.ClickException(str(e))
+    click.echo(f"wrote {out_dir}/alignment.star")
+
+
 @main.command()
 @click.argument("project_dir")
 def stack(project_dir):

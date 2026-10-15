@@ -122,16 +122,21 @@ def prepare_reference(vol, apix: float, mask, lowpass=None, highpass=None, inver
 
 
 def load_volumes(path, box: int, apix: float) -> list[np.ndarray]:
-    """Volumes from an MRC (one cube, or a stack of cubes along z), fitted to ``box``.
-    The voxel size must match ``apix`` (resampling is not implemented)."""
+    """Volumes from an MRC (one cube, or a stack of cubes along z; any axis order), Fourier-resampled
+    to ``apix`` if needed (e.g. EMDB maps) and fitted to ``box``."""
+    from .align import resample
+
     h = read_header(path)
-    if abs(h["apix"] - apix) > 1e-3 * apix:
-        raise ValueError(f"{path}: voxel size {h['apix']:g} Å differs from the project's {apix:g} Å")
     nz, ny, nx = h["shape"]
     if ny != nx or nz % nx:
         raise ValueError(f"{path}: shape {h['shape']} is neither a cube nor a stack of cubes")
-    vol, _ = read_mrc(path, mmap=False)
-    return [fit_box(v, box) for v in vol.reshape(nz // nx, nx, nx, nx)]
+    vol, a = read_mrc(path, mmap=False)
+    out = []
+    for v in vol.reshape(nz // nx, nx, nx, nx):
+        if abs(a - apix) > 1e-3 * apix:
+            v, _ = resample(v, a, apix)
+        out.append(fit_box(v, box))
+    return out
 
 
 def resolve_file(name, root) -> Path:

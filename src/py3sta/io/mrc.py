@@ -14,13 +14,22 @@ def read_header(path) -> dict:
         h = f.read(1024)
     i = np.frombuffer(h, "<i4")
     fl = np.frombuffer(h, "<f4")
-    nx, ny, nz, mode = (int(v) for v in i[:4])
-    mx = int(i[7]) or nx
-    if tuple(i[16:19]) not in ((1, 2, 3), (0, 0, 0)):
-        raise NotImplementedError(f"{path}: non-standard axis order MAPC/R/S={tuple(i[16:19])}")
+    nc, nr, ns, mode = (int(v) for v in i[:4])
+    axes = tuple(int(v) for v in i[16:19])                 # MAPC, MAPR, MAPS: 1 = x, 2 = y, 3 = z
+    if axes == (0, 0, 0):
+        axes = (1, 2, 3)
+    if sorted(axes) != [1, 2, 3]:
+        raise ValueError(f"{path}: invalid axis order MAPC/R/S={axes}")
     if mode not in _MODES:
         raise NotImplementedError(f"{path}: MRC mode {mode} not supported")
-    return {"shape": (nz, ny, nx), "mode": mode, "dtype": _MODES[mode],
+    stored = (ns, nr, nc)                                   # array shape as stored on disk
+    # transpose that brings the stored [section, row, column] axes into [z, y, x]
+    labels = (axes[2], axes[1], axes[0])
+    perm = tuple(labels.index(k) for k in (3, 2, 1))
+    shape = tuple(stored[k] for k in perm)
+    n_x = shape[2]
+    mx = int(i[7]) or n_x
+    return {"shape": shape, "stored_shape": stored, "perm": perm, "mode": mode, "dtype": _MODES[mode],
             "apix": float(fl[10]) / mx if fl[10] else 1.0,
             "offset": 1024 + int(i[23]), "origin": tuple(float(v) for v in fl[49:52])}
 
@@ -29,10 +38,12 @@ def read_mrc(path, mmap: bool = True):
     """Return (array[z,y,x], apix). With mmap=True the file is not loaded into RAM."""
     h = read_header(path)
     if mmap:
-        a = np.memmap(path, dtype=h["dtype"], mode="r", offset=h["offset"], shape=h["shape"])
+        a = np.memmap(path, dtype=h["dtype"], mode="r", offset=h["offset"], shape=h["stored_shape"])
     else:
         a = np.fromfile(path, dtype=h["dtype"], offset=h["offset"],
-                        count=int(np.prod(h["shape"]))).reshape(h["shape"])
+                        count=int(np.prod(h["stored_shape"]))).reshape(h["stored_shape"])
+    if h["perm"] != (0, 1, 2):                              # non-standard MAPC/R/S (e.g. some EMDB maps)
+        a = np.ascontiguousarray(a.transpose(h["perm"]))
     return a, h["apix"]
 
 

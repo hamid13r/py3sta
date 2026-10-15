@@ -169,3 +169,24 @@ def test_odd_pos_rejected(tmp_path):
     p.write_text("1 2 3\n4 5 6\n7 8 9\n")
     with pytest.raises(ValueError, match="odd"):
         dipoles_to_particles([p], 1.0)
+
+
+def test_mrc_axis_order(tmp_path):
+    """MAPC/R/S = (2, 1, 3) (stored [z][x][y], as some EMDB maps) is read back as [z, y, x]."""
+    from py3sta.io.mrc import header_bytes, read_header, read_mrc
+
+    vol = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)      # [z, y, x]
+    stored = vol.transpose(0, 2, 1)                                      # [z][x][y]: columns = y
+    hb = bytearray(header_bytes(stored.shape, np.float32, 2.0))
+    i = np.frombuffer(bytes(hb), "<i4").copy()
+    i[16:19] = (2, 1, 3)
+    i[7:10] = (6, 5, 4)                                                  # MX, MY, MZ follow x, y, z
+    f = i.view("<f4")
+    f[10:13] = (12.0, 10.0, 8.0)
+    p = tmp_path / "p.mrc"
+    p.write_bytes(i.tobytes() + np.ascontiguousarray(stored).tobytes())
+    assert read_header(p)["shape"] == (4, 5, 6)
+    for mmap in (True, False):
+        out, apix = read_mrc(p, mmap=mmap)
+        np.testing.assert_array_equal(out, vol)
+        assert apix == 2.0

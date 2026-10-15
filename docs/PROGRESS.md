@@ -21,6 +21,37 @@ Next concrete tasks:
 6. `py3sta flag` (the `py3staExcluded` filter itself is already honoured by `load_cycle_input`).
 7. `py3sta set-tomograms` STAR helper (swap reconstructions by `tomo_key()`).
 
+## Phase 2 (started early) — map-to-map alignment, `py3sta align-maps` (2026-10-15)
+
+- `align.py`: `resample` (Fourier crop/pad, centre voxel kept, input padded so the output voxel size is
+  exact to ~1e-4), `fourier_shift`, `center_of_mass`, `mirror` (about voxel n//2), `load_map`,
+  `so3_grid` (10°: 14 832 rotations), `local_grid`, masked Pearson CC over all shifts by FFT (`ncc_map`,
+  numpy; batched torch version, parity test), `align_maps` (global grid on binned/low-passed maps → local
+  grids around the top 3 → local grid at full sampling → polish; both hands), `apply_alignment`,
+  `align_map_files`. Convention: the result is the pose (rlnAngle*, shift in the fixed frame) of the fixed
+  structure inside the moving map, i.e. aligned = `extract(moving, c + M.T t, M)` — same as particles.
+- **Polish finding:** RealSpaceTM's polish optimises the rotation against the best *integer-shift* CC. With a
+  fractional true shift this is biased: a 2–4° rotation error mimics a half-voxel shift and scores higher
+  (synthetic: true pose 0.980 vs 3° off 0.990). py3sta polishes rotation + sub-voxel shift together
+  (6-D Nelder-Mead) on the CC of the map extracted at exactly that pose; shifts bounded by `--max-shift`.
+  Synthetic accuracy: < 0.15° and < 0.005 voxel (4 random poses), 2.6 s on GPU (40³), 29 s numpy.
+- MRC reader handles any MAPC/R/S axis order (EMD-30432 is 2,1,3). Reference files with another voxel
+  size are now resampled (`reference.load_volumes`), so EMDB maps work as `file` references.
+- New core dependency: scipy (Nelder-Mead).
+- CLI `py3sta align-maps FIXED MOVING... -o DIR` (mask, lowpass, bin, step, max-shift, polish, no-mirror,
+  invert, center, backend/gpu) → `<name>_aligned.mrc`, `<name>_fsc.txt`, `alignment.star`.
+
+**Real data** (fixed = MIM019 cycle-000 average, white, 72³ @ 6.65 Å; RTX A5000; ~30 s per map incl. both hands):
+
+| Moving map | Result |
+|---|---|
+| user's `average.mrc` with a known pose (−48, 117, 63)°, shift (17.29, −11.30, 21.28) Å, `--invert` | recovered (−48.00, 117.00, 62.99)°, (17.29, −11.30, 21.29) Å; CC 0.997 (mirror 0.486) |
+| same without `--invert` | CC 0.08, warning "contrast inverted?" (min CC −0.88) |
+| EMD-30432 (mouse kidney 80S, 2.82 Å, 400³ @ 1.04 Å) | direct hand CC 0.787 vs mirror 0.527 → **tomogram hand matches EMDB**; FSC 0.5 at 22 Å; pose (−20.7, 125.6, −116.6)°, shift ~8 Å |
+| IsoNet average, `--invert` | identity rotation, zero shift, CC 0.943 (same poses, as expected) |
+
+Files: `data/align_test/` (B/compare_emdb.png shows the fit). EMDB map: `data/emdb/`.
+
 ## Phase 1 task 3 — `02_reference`, contrast (2026-10-15)
 
 - `reference.py`: `make_mask` (sphere / ellipsoid / box / file; raised-cosine edge centred on the size, Å;
@@ -113,6 +144,9 @@ Next concrete tasks:
   CC with the raw-tomogram average 0.946. Files: `data/isonet_average/`.
 
 ## Decisions
+
+- (2026-10-15) No automatic fitting of `file` references (no `reference.fit`): the user aligns external maps
+  with `py3sta align-maps` and provides the fitted map — routine practice.
 
 - (2026-10-15) No content hashing of large files: run ids between steps, size/mtime for external files.
   STAR files stay user-editable: fingerprinted (hash only when size/mtime changed), edits tracked, never lost.

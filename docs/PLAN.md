@@ -156,6 +156,9 @@ py3sta status
   search with per-axis limits and sub-voxel peak; angular grids: i3 cone/spin (`nut nstep spin sstep`)
   around current pose, uniform global grid, coarse→fine; optional membrane-normal restraint from dipole
   priors. Rotate the reference (shared across particles) → batched GPU. Gold-standard halves kept separate.
+- **Map-to-map alignment** (done, `align.py`, `py3sta align-maps`): global SO(3) grid + FFT shift search on binned
+  maps, local grids, 6-D polish (rotation + sub-voxel shift on the exact-pose CC), hand check, contrast check.
+  Particle MRA reuses the masked-CC-over-shifts core with the reference rotated per pose.
 - **Pose composition**: delta (R, t) in reference frame → new particle matrix and centre; one function,
   tested with synthetic known transforms (both for MRA and class-average propagation).
 - **Masks/filters**: sphere, ellipsoid, box, cylinder, file; soft edges; band-pass in Å.

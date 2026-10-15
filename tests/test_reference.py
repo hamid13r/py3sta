@@ -37,7 +37,7 @@ def test_ellipsoid_box_and_center():
     assert xx.mean() == pytest.approx(28) and yy.mean() == pytest.approx(20)
 
 
-def test_mask_file(tmp_path):
+def test_mask_file(tmp_path):  # noqa: D103
     write_mrc(tmp_path / "m.mrc", np.full((16,) * 3, 2.0, np.float32), 2.0)
     assert make_mask(16, 2.0, "file", file=tmp_path / "m.mrc").max() == 1.0
     with pytest.raises(ValueError, match="differs from the box"):
@@ -84,8 +84,7 @@ def test_load_volumes_stack(tmp_path):
     write_mrc(tmp_path / "s.mrc", vols, 2.0)
     out = load_volumes(tmp_path / "s.mrc", 10, 2.0)
     assert len(out) == 3 and out[1][5, 5, 5] == vols[8 + 4, 4, 4]
-    with pytest.raises(ValueError, match="voxel size"):
-        load_volumes(tmp_path / "s.mrc", 10, 1.0)
+    assert load_volumes(tmp_path / "s.mrc", 10, 1.0)[0].shape == (10,) * 3      # resampled 2 -> 1 Å
 
 
 def test_protein_contrast():
