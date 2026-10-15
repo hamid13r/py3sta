@@ -26,7 +26,34 @@ Done:
 **Phase 2 — particle alignment (MRA)**, in three parts:
 1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
 2. ✅ `03_align` step (2026-10-15, see below).
-3. MIM019: angles perturbed ±15° recovered (median < 5°), FSC not worse; timing (265 × 2000 < 1 min; full set).
+3. MIM019 checks (2026-10-15, see below): timing ✅ (44 s), recovery ✅ (median 2.07°), FSC "not worse" ✗
+   (0.5–0.7 Å short of the RELION poses) — open, see "Phase 2 part 3".
+
+## Phase 2 part 3 — MIM019 alignment checks (2026-10-15, RTX A5000)
+
+- Speed: crops band-passed on the GPU (was numpy, ~25 % of the time) → **11 000 evaluations/s** at bin 2
+  (box 72 → 36, constrained CC), ~1 500/s at bin 1. Batch 256 / chunk 32 defaults (larger batches no faster).
+- **Timing: 265 particles (MIM019_2_lam11_ts_003) × 1 980 orientations, bin 2: 44 s** (target < 1 min ✅).
+- Bug found: the total shift was clipped per axis in the reference frame, but the crop allowance is per
+  tomogram axis (a ±2 cube reaches 2√3 along a tomogram axis) → 58 particles left their crop. Now clipped per
+  tomogram axis (`max_shift` is per tomogram axis); test added.
+- Recovery: all 6081 particles perturbed by a random rotation (uniform 0–15°, median 7.5°), aligned to the
+  cycle-0 average (sphere mask 191.5 Å, low-pass 30 Å), levels `[[18,6,18,6],[6,2,6,2],[2,0.5,2,0.5]]`, bin 2,
+  max shift 2 voxels:
+
+| | FSC 0.5 | FSC 0.143 | CC with original average | error vs RELION poses |
+|---|---|---|---|---|
+| original (RELION) poses | 24.9 Å | 16.3 Å | 1.0000 | — |
+| perturbed | 34.5 Å | 22.5 Å | 0.9696 | median 7.5° |
+| aligned, bin 2 (580 s) | 25.6 Å | 16.8 Å | 0.9977 | **median 2.07°**, 90 % 8.9°; centre 3.35 Å |
+| + bin 1 rotation-only refinement (1 589 s, low-pass 20 Å) | 25.7 Å | 17.9 Å | 0.9977 | median 2.08°, 90 % 8.6° |
+
+- 782 of 6081 (13 %) at the search edge after bin 2 (mostly the shift limit; median CC 0.36 — low-SNR particles).
+- The bin-1 pass did not help (FSC 0.143 got worse: refining against a single full-map reference at 20 Å
+  probably fits noise; references are not half-set, by decision). A second pass with shifts needs re-cropped
+  particles (1486 had used their crop allowance) — the pipeline does that between cycles.
+- Open: is ~2° the precision floor of this data at 30 Å, or a method limit? Control to run: align the
+  *unperturbed* RELION poses with the same settings and measure how far they move and the FSC.
 
 ## Phase 2 part 2 — `03_align` step (2026-10-15)
 
