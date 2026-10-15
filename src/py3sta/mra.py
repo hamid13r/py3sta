@@ -196,6 +196,17 @@ class _TorchScorer:
         self.Fref = torch.fft.rfftn(torch.as_tensor(pr.refs, device=device), dim=(1, 2, 3))
         self.fixed0 = [self._fixed(self.Fref[r][None]) for r in range(len(pr.refs))]
         self.win = torch.as_tensor(shift_window(n, pr.max_shift), device=device)
+        self._crop_filter = None
+
+    def filter_crops(self, crops):
+        """Band-pass raw crops (P, S, S, S) on the device (= filter_crop)."""
+        t = self.torch
+        S = crops.shape[-1]
+        if self._crop_filter is None or self._crop_filter.shape[0] != S:
+            self._crop_filter = t.as_tensor(bandpass_filter(S, self.pr.apix, self.pr.lowpass, self.pr.highpass),
+                                            device=self.dev)
+        c = t.as_tensor(crops, device=self.dev)
+        return t.fft.irfftn(t.fft.rfftn(c, dim=(1, 2, 3)) * self._crop_filter, s=(S,) * 3, dim=(1, 2, 3))
 
     def _fixed(self, Fr):
         t = self.torch
@@ -249,7 +260,7 @@ class _TorchScorer:
 
 # ------------------------------------------------------------------ driver
 def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, tilts: dict | None = None,
-                    invert: bool = False, device=None, batch: int = 128, chunk: int = 16,
+                    invert: bool = False, device=None, batch: int = 256, chunk: int = 32,
                     progress=None) -> MRAResult:
     """Align every particle of ``ps`` (from its ``stack`` crop) to each reference; keep the best.
 
@@ -290,8 +301,10 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
             crops = np.array(data[loc.rows[ids]], np.float32)
             if invert:
                 crops = -crops
-            crops = np.stack([filter_crop(c, pr) for c in crops])
-            cubes = scorer.torch.as_tensor(crops, device=device) if scorer else None
+            if scorer:
+                cubes = scorer.filter_crops(crops)
+            else:
+                crops = np.stack([filter_crop(c, pr) for c in crops])
             lo = loc.lo[ids]
 
             def evaluate(p_of, M, cen, r, keep_maps=False):
