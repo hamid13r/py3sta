@@ -54,16 +54,13 @@ def average_params(p: ProjectConfig, c: CycleConfig) -> dict:
             "particle_radius": p.norm_radius_vox * p.apix, "invert_contrast": p.invert_contrast}
 
 
-def run_average(ctx, project, n: int, c: CycleConfig) -> None:
-    from ..average import fsc, per_tomo_cc, protein_contrast, resolution_at
-    from ..io.mrc import write_mrc
+def _averager(ctx, project, c: CycleConfig, cin):
+    """``average(particles, **extra) -> AverageResult`` from the stack with the cycle's wedge / CTF /
+    normalisation settings on the project's device; records tomograms and tilt files as inputs."""
     from ..stack import ParticleStack
     from ..wedge import TiltInfo
-    from .project import load_cycle_input
 
     p = project.config
-    cin = load_cycle_input(project, n)
-    ctx.read_star(project.cycle_input(n))
     ctx.use_files(cin.tomograms.values(), "tomogram")
     ctx.use_files(cin.tilt_files.values(), "tilt file")
     tilts = None
@@ -74,22 +71,36 @@ def run_average(ctx, project, n: int, c: CycleConfig) -> None:
             no_ctf = [t for t, v in tilts.items() if v.ctf is None]
             if no_ctf:
                 raise ValueError(f"ctf.mode {c.ctf.mode}: no CTF information for {', '.join(no_ctf[:5])}")
-    stack = ParticleStack.open(project.stack_dir)
     kw = dict(normalize=c.average.normalize, tilts=tilts, dose_weight=p.wedge.dose_weight,
               ctf_mode=None if c.ctf.mode == "none" else c.ctf.mode, height_sign=c.ctf.height_sign,
-              norm_radius=p.norm_radius_vox, stack=stack, per_tomo=True, invert=p.invert_contrast)
+              norm_radius=p.norm_radius_vox, stack=ParticleStack.open(project.stack_dir), invert=p.invert_contrast)
     device, _ = resolve_device(p.compute)
-    ctx.log(f"averaging {len(cin.particles)} particles from the stack ({cin.n_excluded} excluded)")
-    if device is None:
-        import os
 
-        from ..average import average_particles
+    def average(particles, **extra):
+        if device is None:
+            import os
 
-        res = average_particles(cin.particles, None, p.box, jobs=p.compute.jobs or os.cpu_count(), **kw)
-    else:
+            from ..average import average_particles
+
+            return average_particles(particles, None, p.box, jobs=p.compute.jobs or os.cpu_count(), **kw, **extra)
         from ..backend_torch import average_particles_torch
 
-        res = average_particles_torch(cin.particles, None, p.box, device=device, **kw)
+        return average_particles_torch(particles, None, p.box, device=device, **kw, **extra)
+
+    return average
+
+
+def run_average(ctx, project, n: int, c: CycleConfig) -> None:
+    from ..average import fsc, per_tomo_cc, protein_contrast, resolution_at
+    from ..io.mrc import write_mrc
+    from .project import load_cycle_input
+
+    p = project.config
+    cin = load_cycle_input(project, n)
+    ctx.read_star(project.cycle_input(n))
+    average = _averager(ctx, project, c, cin)
+    ctx.log(f"averaging {len(cin.particles)} particles from the stack ({cin.n_excluded} excluded)")
+    res = average(cin.particles, per_tomo=True)
     write_mrc(ctx.output("average.mrc"), res.average, res.apix)
     info = ctx.info
     info.update(n_particles=cin.n_total, n_excluded=cin.n_excluded, n_used=res.n_used, n_skipped=res.n_skipped)
@@ -172,27 +183,223 @@ def run_reference(ctx, project, n: int, c: CycleConfig) -> None:
             + ", ".join(f"{row['py3staReferenceCC']:.3f}" for row in rows))
 
 
+# ------------------------------------------------------------- pose source
+def pose_source(before: str) -> Step | None:
+    """The last implemented step before ``before`` that writes particle poses; None = 00_input.star."""
+    names = [s.name for s in STEPS]
+    return next((s for s in reversed(STEPS[:names.index(before)]) if s.poses and s.implemented), None)
+
+
+def pose_star(project, n: int, before: str):
+    """(path, source step name) of the particle poses that step ``before`` starts from."""
+    src = pose_source(before)
+    if src is None:
+        return project.cycle_input(n), "input"
+    return project.cycle_dir(n) / src.folder / src.poses, src.name
+
+
+def _with_pose_source(name: str, upstream=()):
+    """Upstream function: fixed upstream steps + the step providing the poses."""
+    def fn(c: CycleConfig) -> tuple:
+        src = pose_source(name)
+        ups = tuple(upstream(c) if callable(upstream) else upstream)
+        return ups + ((src.name,) if src and src.name not in ups else ())
+    return fn
+
+
+def _source_name(before: str) -> str:
+    src = pose_source(before)
+    return src.name if src else "input"
+
+
+def _particle_block(blocks: dict):
+    return blocks["particles"] if "particles" in blocks else next(iter(blocks.values()))
+
+
+# ---------------------------------------------------------------- classify
+CLASS_COLUMN = "py3staClass"
+
+
+def classify_upstream(c: CycleConfig) -> tuple:
+    return () if c.classify.method == "column" else ("msa",)
+
+
+def classify_params(p: ProjectConfig, c: CycleConfig) -> dict:
+    return {"classify": dataclasses.asdict(c.classify), **average_params(p, c), "pose_source": _source_name("classify")}
+
+
+def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
+    """method column: classes from an integer STAR column (placeholder until MSA + k-means exist);
+    class averages from the stack with the cycle's averaging settings."""
+    import pandas as pd
+
+    from ..io.mrc import open_volume_stack
+    from ..io.star import write_star
+    from .project import PARTICLE_NAME, load_cycle_input
+
+    p = project.config
+    path, src = pose_star(project, n, "classify")
+    ctx.read_star(path)
+    cin = load_cycle_input(project, n, path)
+    df = cin.particles.df
+    col = c.classify.column
+    if col not in df:
+        ctx.warn(f"no column {col}: all particles in class 1")
+        cls = np.ones(len(df), int)
+    else:
+        v = pd.to_numeric(df[col], errors="coerce").to_numpy()
+        bad = ~np.isfinite(v) | (v != np.round(v))
+        if bad.any():
+            raise ValueError(f"{path.name}: column {col} is not an integer for {int(bad.sum())} particle(s)")
+        cls = v.astype(int)
+    ids = np.unique(cls)
+    write_star({"classes": pd.DataFrame({PARTICLE_NAME: df[PARTICLE_NAME].astype(str), CLASS_COLUMN: cls})},
+               ctx.output_star(f"class_{c.classify.method}.star"))
+    average = _averager(ctx, project, c, cin)
+    out = open_volume_stack(ctx.output("classes.mrcs"), len(ids), p.box, np.float32, p.apix, mode="w+")
+    rows = []
+    for k, cid in enumerate(ids):
+        sel = cls == cid
+        members = dataclasses.replace(cin.particles, df=df[sel].reset_index(drop=True))
+        res = average(members)
+        out[k] = res.average
+        rows.append({CLASS_COLUMN: int(cid), "py3staClassIndex": k + 1, "py3staClassCount": int(sel.sum()),
+                     "py3staClassFraction": round(float(sel.mean()), 4)})
+        ctx.log(f"class {cid}: {int(sel.sum())} particles")
+    out.flush()
+    write_star({"classes": pd.DataFrame(rows)}, ctx.output_star("classes.star"))
+    ctx.info.update(n_classes=len(ids), counts={int(r[CLASS_COLUMN]): r["py3staClassCount"] for r in rows},
+                    pose_source=src)
+
+
+# ------------------------------------------------------------------ select
+def select_params(p: ProjectConfig, c: CycleConfig) -> dict:
+    return {"select": dataclasses.asdict(c.select), "box": p.box, "apix": p.apix, "pose_source": _source_name("select")}
+
+
+def class_actions(ids, s) -> dict:
+    """{class: 'align' | 'leave' | 'exclude'}; classes not listed: align if align == 'all', else leave."""
+    out = {}
+    for cid in ids:
+        cid = int(cid)
+        if cid in s.exclude:
+            out[cid] = "exclude"
+        elif cid in s.leave:
+            out[cid] = "leave"
+        elif s.align == "all" or cid in s.align:
+            out[cid] = "align"
+        else:
+            out[cid] = "leave"
+    return out
+
+
+def run_select(ctx, project, n: int, c: CycleConfig) -> None:
+    """Align class averages to the target and compose each class transform onto its members (poses.py);
+    leave keeps poses; exclude sets py3staExcluded. Writes selected.star (every particle of the pose source)."""
+    import pandas as pd
+
+    from ..align import align_maps, apply_alignment, load_map
+    from ..io.mrc import open_volume_stack, read_mrc
+    from ..io.star import read_star, write_star
+    from ..poses import apply_delta
+    from ..reference import resolve_file
+    from .project import EXCLUDED, PARTICLE_NAME, load_cycle_input
+
+    p, s = project.config, c.select
+    cdir = project.cycle_dir(n)
+    path, src = pose_star(project, n, "select")
+    ctx.read_star(path)
+    cin = load_cycle_input(project, n, path)
+    cl_dir = cdir / get_step("classify").folder
+    cls_star = cl_dir / f"class_{c.classify.method}.star"
+    ctx.read_star(cls_star)
+    assign = _particle_block(read_star(cls_star)).astype({PARTICLE_NAME: str}).set_index(PARTICLE_NAME)[CLASS_COLUMN]
+    classes = _particle_block(read_star(cl_dir / "classes.star"))
+    averages = np.array(read_mrc(cl_dir / "classes.mrcs", mmap=False)[0]).reshape(-1, p.box, p.box, p.box)
+
+    names = cin.particles.df[PARTICLE_NAME].astype(str)
+    missing = ~names.isin(assign.index)
+    if missing.any():
+        raise ValueError(f"{int(missing.sum())} particle(s) have no class in {cls_star.name} (re-run classify)")
+    cls = assign.loc[names].to_numpy(int)
+    ids = classes[CLASS_COLUMN].to_numpy(int)
+    actions = class_actions(ids, s)
+
+    ref_dir = cdir / get_step("reference").folder
+    mask = read_mrc(ref_dir / "mask.mrc", mmap=False)[0]
+    if s.target == "reference":
+        refs = read_mrc(ref_dir / "references.mrcs", mmap=False)[0].reshape(-1, p.box, p.box, p.box)
+        target = np.array(refs[0])
+        if len(refs) > 1:
+            ctx.warn(f"{len(refs)} references: class averages are aligned to reference 1")
+    else:
+        f = resolve_file(s.target, project.root)
+        ctx.use_files([f], "target")
+        target = load_map(f, p.apix, p.box)
+    device, _ = resolve_device(p.compute)
+
+    ps = cin.particles
+    rows = []
+    cc_of = {}
+    aligned = open_volume_stack(ctx.output("classes_aligned.mrcs"), len(ids), p.box, np.float32, p.apix, mode="w+")
+    for k, cid in enumerate(ids):
+        act = actions[int(cid)]
+        members = cls == cid
+        row = {CLASS_COLUMN: int(cid), "py3staClassAction": act, "py3staClassCount": int(members.sum()),
+               "rlnAngleRot": 0.0, "rlnAngleTilt": 0.0, "rlnAnglePsi": 0.0,
+               "rlnOriginXAngst": 0.0, "rlnOriginYAngst": 0.0, "rlnOriginZAngst": 0.0, "py3staClassCC": np.nan}
+        aligned[k] = averages[k]
+        if act == "align" and members.any():
+            res = align_maps(target, averages[k], p.apix, mask, lowpass=s.lowpass, highpass=s.highpass,
+                             bin_factor=s.bin, step=s.step, max_shift_A=s.max_shift, try_mirror=False, device=device)
+            if res.inverted_contrast_suspected:
+                ctx.warn(f"class {cid}: anti-correlates with the target (min CC {res.min_cc:.2f}): contrast inverted?")
+            ps = apply_delta(ps, res.matrix, res.shift, p.apix, rows=members)
+            aligned[k] = apply_alignment(averages[k], res)
+            row.update(zip(["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi"], np.round(res.euler, 3)))
+            row.update(zip(["rlnOriginXAngst", "rlnOriginYAngst", "rlnOriginZAngst"], np.round(res.shift * p.apix, 3)))
+            row["py3staClassCC"] = round(res.cc, 4)
+            ctx.log(f"class {cid} ({int(members.sum())}): rot/tilt/psi {np.round(res.euler, 1)}, "
+                    f"shift {np.round(res.shift * p.apix, 1)} Å, CC {res.cc:.3f}")
+        else:
+            ctx.log(f"class {cid} ({int(members.sum())}): {act}")
+        cc_of[int(cid)] = row["py3staClassCC"]
+        rows.append(row)
+    aligned.flush()
+    write_star({"transforms": pd.DataFrame(rows)}, ctx.output_star("transforms.star"))
+
+    # selected.star: all rows of the pose source; active rows get poses, class, score, exclusion
+    blocks = read_star(path)
+    out = _particle_block(blocks)
+    pos = pd.Series(np.arange(len(out)), index=out[PARTICLE_NAME].astype(str)).loc[names].to_numpy()
+    cols = ["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi", "rlnOriginXAngst", "rlnOriginYAngst", "rlnOriginZAngst"]
+    for col in cols:
+        if col not in out:
+            out[col] = 0.0
+    out.loc[out.index[pos], cols] = ps.df[cols].to_numpy()
+    for col, default in (("rlnClassNumber", 0), ("py3staClassCC", np.nan), (EXCLUDED, 0)):
+        if col not in out:
+            out[col] = default
+    out.loc[out.index[pos], "rlnClassNumber"] = cls
+    out.loc[out.index[pos], "py3staClassCC"] = [cc_of[int(k)] for k in cls]
+    excl = np.array([actions[int(k)] == "exclude" for k in cls])
+    if excl.any():
+        if "py3staExcludedCycle" not in out:
+            out["py3staExcludedCycle"] = -1
+        out.loc[out.index[pos[excl]], EXCLUDED] = 1
+        out.loc[out.index[pos[excl]], "py3staExcludedCycle"] = n
+    write_star(blocks, ctx.output_star("selected.star"))
+    ctx.info.update(actions={str(k): v for k, v in actions.items()}, n_excluded_now=int(excl.sum()),
+                    class_cc={str(k): v for k, v in cc_of.items()}, pose_source=src)
+
+
 # ------------------------------------------------------------------- final
 def final_name(n: int) -> str:
     return f"cycle-{n:03d}_final.star"
 
 
-def pose_source(c: CycleConfig | None = None) -> Step | None:
-    """The last implemented step that writes particle poses (select, else align); None = 00_input.star."""
-    return next((s for s in reversed(STEPS) if s.poses and s.implemented), None)
-
-
-def final_upstream(c: CycleConfig) -> tuple:
-    src = pose_source(c)
-    return (src.name,) if src else ()
-
-
 def final_params(p: ProjectConfig, c: CycleConfig) -> dict:
-    return {"cycle": c.cycle}
-
-
-def _particle_block(blocks: dict):
-    return blocks["particles"] if "particles" in blocks else next(iter(blocks.values()))
+    return {"cycle": c.cycle, "pose_source": _source_name("final")}
 
 
 def run_final(ctx, project, n: int, c: CycleConfig) -> None:
@@ -201,23 +408,21 @@ def run_final(ctx, project, n: int, c: CycleConfig) -> None:
     from ..io.star import read_star, write_star
     from .project import PARTICLE_NAME, load_particles
 
-    src = pose_source(c)
-    path = project.cycle_input(n) if src is None else project.cycle_dir(n) / src.folder / src.poses
+    path, src = pose_star(project, n, "final")
     ctx.read_star(path)
     load_particles(project, path)                             # validates (also after hand edits)
     blocks = read_star(path)
     df = _particle_block(blocks)
     df["py3staCycle"] = n
-    if src is not None:                                       # a step must not drop particles
+    lost = ()
+    if src != "input":                                        # a step must not drop particles
         names_in = _particle_block(read_star(project.cycle_input(n)))[PARTICLE_NAME].astype(str)
         lost = set(names_in) - set(df[PARTICLE_NAME].astype(str))
-    else:
-        lost = ()
     if lost:
         raise ValueError(f"{path.name}: {len(lost)} particle(s) of 00_input.star missing: {', '.join(sorted(lost)[:5])}")
     write_star(blocks, ctx.output_star(final_name(n)))
-    ctx.info.update(n_particles=len(df), pose_source=src.name if src else "input")
-    ctx.log(f"{final_name(n)}: {len(df)} particles, poses from {src.name if src else '00_input.star'}")
+    ctx.info.update(n_particles=len(df), pose_source=src)
+    ctx.log(f"{final_name(n)}: {len(df)} particles, poses from {'00_input.star' if src == 'input' else src}")
 
 
 # ------------------------------------------------------------------- order
@@ -226,10 +431,11 @@ STEPS: tuple[Step, ...] = (
     Step("reference", "02_reference", reference_upstream, reference_params, run_reference),
     Step("align", "03_align", ("reference",), poses="aligned.star"),
     Step("msa", "04_msa", ("align",)),
-    Step("classify", "05_classify", ("msa",)),
+    Step("classify", "05_classify", _with_pose_source("classify", classify_upstream), classify_params, run_classify),
     Step("embed", "06_embed", ("classify",)),
-    Step("select", "07_select", ("classify",), poses="selected.star"),
-    Step("final", "08_final", final_upstream, final_params, run_final),
+    Step("select", "07_select", _with_pose_source("select", ("classify", "reference")), select_params, run_select,
+         poses="selected.star"),
+    Step("final", "08_final", _with_pose_source("final"), final_params, run_final),
 )
 BY_NAME = {s.name: s for s in STEPS}
 

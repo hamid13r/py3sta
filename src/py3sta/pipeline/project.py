@@ -120,8 +120,9 @@ def load_particles(project: Project, star) -> tuple[ParticleSet, dict, dict]:
     return ps, tomos, xmls
 
 
-def load_cycle_input(project: Project, n: int) -> CycleInput:
-    path = project.cycle_input(n)
+def load_cycle_input(project: Project, n: int, path=None) -> CycleInput:
+    """Cycle n's particles from 00_input.star, or from ``path`` (a step's pose output)."""
+    path = project.cycle_input(n) if path is None else Path(path)
     if not path.is_file():
         raise ConfigError(f"{path}: missing")
     ps, tomos, xmls = load_particles(project, path)

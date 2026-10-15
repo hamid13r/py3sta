@@ -24,9 +24,9 @@ project/
     02_reference/            # references.mrcs + references.star (1..N references)
     03_align/                # aligned.star (optional MRA; reference rotated, particles in tomogram frame)
     04_msa/                  # rotated/masked/binned MSA stack, eigenvolumes, scree, scores
-    05_classify/             # class_K004.star ... (one per K and method), class averages, counts, dendrogram
+    05_classify/             # class_K004.star ... (one per K and method; class_column.star), classes.mrcs, counts, dendrogram
     06_embed/                # UMAP/t-SNE embeddings, user-drawn selections (lasso groups)
-    07_select/               # selection.yaml (chosen K / groups, per-class action + target), class-average alignment
+    07_select/               # selected.star, transforms.star, classes_aligned.mrcs (settings: cycle.yaml select:)
     08_final/cycle-000_final.star   # copied to cycle-001/00_input.star by `next`
 ```
 
@@ -115,7 +115,9 @@ keeps ~80 % amplitude per pass at half Nyquist, ~27 Å on MIM019).
    - v1: self-contained HTML (plotly.js lasso, data embedded, no server) → "Export groups" writes JSON.
    - v2: local server (FastAPI/Dash) that computes the class average of a drawn group live (GPU) and can
      push it to ChimeraX (REST `remotecontrol`), plus eigenvolume slider views.
-7. **Select + align class averages** — `py3sta select`:
+   - Placeholder (done): `classify.method: column` — classes from an integer STAR column, class averages.
+7. **Select + align class averages** — `select:` in `cycle.yaml` (done: align/leave/exclude, target reference
+   or MRC; `py3sta select` will write that section):
    - choose a classification (a K, a method, or the lasso groups),
    - per class: `align` | `leave` | `exclude`,
    - targets: aligned classes **to each other** (exhaustive search among them, then refine against their

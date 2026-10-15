@@ -23,6 +23,7 @@ WEDGE_SIGNS = ("auto", 1, -1)
 REFERENCE_MODES = ("global", "file", "classes")
 MASK_SHAPES = ("sphere", "ellipsoid", "box", "file")
 STACK_DTYPES = ("float16", "float32")
+CLASSIFY_METHODS = ("column",)
 
 
 class ConfigError(ValueError):
@@ -126,11 +127,32 @@ class ReferenceConfig:
 
 
 @dataclass
+class ClassifyConfig:
+    method: str = "column"                      # column: classes from an integer STAR column (kmeans etc. later)
+    column: str = "rlnClassNumber"              # method column; a missing column = one class
+
+
+@dataclass
+class SelectConfig:
+    align: typing.Union[str, typing.List[int]] = "all"   # classes aligned to the target ("all" = the rest)
+    leave: typing.List[int] = field(default_factory=list)    # poses kept
+    exclude: typing.List[int] = field(default_factory=list)  # members get py3staExcluded = 1
+    target: str = "reference"                   # reference (02_reference, reference 1) | path to an MRC
+    lowpass: typing.Optional[float] = 30.0      # Å, alignment search
+    highpass: typing.Optional[float] = None     # Å
+    bin: int = 2                                # binning of the global search
+    step: float = 10.0                          # deg, global angular step
+    max_shift: float = 20.0                     # Å
+
+
+@dataclass
 class CycleConfig:
     cycle: int = 0
     ctf: CtfConfig = field(default_factory=CtfConfig)  # belongs to the tomograms in 00_input.star
     average: AverageConfig = field(default_factory=AverageConfig)
     reference: ReferenceConfig = field(default_factory=ReferenceConfig)
+    classify: ClassifyConfig = field(default_factory=ClassifyConfig)
+    select: SelectConfig = field(default_factory=SelectConfig)
     schema: int = SCHEMA
 
     def validate(self, project: ProjectConfig | None = None, where: str = "cycle.yaml") -> None:
@@ -172,6 +194,23 @@ class CycleConfig:
             if r.lowpass:
                 err.check(r.lowpass >= 2 * project.apix, "reference.lowpass",
                           f"{r.lowpass:g} Å is beyond Nyquist ({2 * project.apix:g} Å)")
+        err.choice(self.classify.method, CLASSIFY_METHODS, "classify.method")
+        sel = self.select
+        err.check(sel.align == "all" or isinstance(sel.align, list), "select.align",
+                  f"must be 'all' or a list of class numbers (got {sel.align!r})")
+        lists = {"align": sel.align if isinstance(sel.align, list) else [], "leave": sel.leave, "exclude": sel.exclude}
+        for a, b in (("align", "leave"), ("align", "exclude"), ("leave", "exclude")):
+            both = sorted(set(lists[a]) & set(lists[b]))
+            err.check(not both, f"select.{b}", f"class(es) {both} also in select.{a}")
+        for key, v in (("lowpass", sel.lowpass), ("highpass", sel.highpass)):
+            err.check(v is None or v > 0, f"select.{key}", f"must be > 0 Å or null (got {v})")
+        err.check(sel.bin >= 1, "select.bin", f"must be >= 1 (got {sel.bin})")
+        err.check(0 < sel.step <= 90, "select.step", f"must be in (0, 90] degrees (got {sel.step})")
+        err.check(sel.max_shift >= 0, "select.max_shift", f"must be >= 0 Å (got {sel.max_shift})")
+        if project is not None and sel.lowpass:
+            err.check(sel.lowpass >= 2 * project.apix * sel.bin, "select.lowpass",
+                      f"{sel.lowpass:g} Å is beyond Nyquist of the binned search ({2 * project.apix * sel.bin:g} Å); "
+                      "lower select.bin or raise select.lowpass")
         err.raise_if_any()
 
     @classmethod
@@ -182,6 +221,8 @@ class CycleConfig:
         c.reference.mask.radius = [_round(0.4 * box)]
         c.reference.mask.soft = _round(0.1 * box)
         c.reference.lowpass = max(30.0, _round(4 * project.apix))
+        c.select.lowpass = c.reference.lowpass
+        c.select.max_shift = _round(0.1 * box)
         return c
 
 
@@ -204,6 +245,9 @@ CYCLE_HEADER = """\
 # ctf.mode: none | flip | wiener | amplitude -- belongs to the tomograms in 00_input.star ('py3sta ctf-check')
 # All sizes in Å.  reference.mode: global | file | classes;  mask.shape: sphere | ellipsoid | box | file
 # mask.radius: 1 value (sphere) or 3 (ellipsoid / box half-sizes); reference.invert flips reference files only
+# classify.method: column (classes from classify.column; missing column = one class)
+# select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
+#   target: reference (02_reference, reference 1) or an MRC path; lowpass / highpass / max_shift in Å, step in deg
 """
 
 

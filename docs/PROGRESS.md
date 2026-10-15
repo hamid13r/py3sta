@@ -17,10 +17,46 @@ Done:
 
 4. ✅ Pose composition (`poses.py`), `08_final` → `cycle-NNN_final.star`, `py3sta next` (2026-10-15, see below).
 
+5. ✅ `05_classify` (method `column`) + minimal `07_select` (align / leave / exclude, target reference or MRC):
+   full cycle average → reference → classify → select → final → next runs end to end (2026-10-15, see below).
+
 Next concrete tasks:
-5. Dummy classification from existing `rlnClassNumber` to run select/final end-to-end before the real engines exist.
 6. `py3sta flag` (the `py3staExcluded` filter itself is already honoured by `load_cycle_input`).
 7. `py3sta set-tomograms` STAR helper (swap reconstructions by `tomo_key()`).
+
+## Phase 1 task 5 — `05_classify` (column) + minimal `07_select` (2026-10-15)
+
+- `classify.method: column` takes classes from any integer column (`classify.column`, default
+  `rlnClassNumber`; missing column = one class, with a warning; non-integer values are an error). No upstream
+  except the pose source, so it runs before MSA exists. Outputs `class_column.star` (particle → `py3staClass`),
+  `classes.mrcs` (class averages from the stack with the cycle's averaging settings), `classes.star` (counts).
+- `select:` section of `cycle.yaml`: `align` (`all` = every class not listed elsewhere, or a list), `leave`,
+  `exclude`, `target` (`reference` = 02_reference reference 1, or an MRC path, resampled), search settings
+  (`lowpass`, `highpass`, `bin`, `step`, `max_shift`; validated against the binned Nyquist). Each aligned class
+  average goes through `align_maps` (no mirror: a mirrored transform cannot be applied to poses) with the
+  02_reference mask; the transform is composed onto its members (`apply_delta`). Outputs `selected.star` (every
+  row of the pose source; `rlnClassNumber`, `py3staClassCC`, exclusion with `py3staExcludedCycle`),
+  `transforms.star` (per class: action, angles, shift Å, CC), `classes_aligned.mrcs`.
+- Pose sources generalised: classify, select and final each start from the poses of the last implemented
+  pose-writing step before them (align → select) and record it as upstream; `load_cycle_input(path=)`.
+- `_averager` helper shared by 01_average and 05_classify (same wedge / CTF / normalisation / device).
+- Tests (`test_pipeline_select.py`, chiral Gaussian object placed analytically in 2 tomograms, box 40): class 2
+  poses perturbed by a known (R, t) → after classify + select all poses within 1° / 0.3 voxel of the truth;
+  leave keeps poses, exclude flags members and the next cycle skips them; staleness (column change → classify
+  stale → select → final), edited `selected.star` protected, config validation, missing/non-integer column.
+
+| MIM019 check (6081 particles, classes = rlnRandomSubset, class 2 perturbed by R = (20°, 15°, −10°), t = (2, 0, −1) voxels; target = unperturbed cycle-0 average) | value |
+|---|---|
+| class 2 transform found | (20.0°, 15.0°, −10.0°), shift (13.3, 0, −6.6) Å — exact; CC 0.999 |
+| class 1 transform found | identity (tilt 0, rot = −psi), shift 0; CC 0.999 |
+| final poses vs truth (mean) | class 1 0.04° / 0.04 Å, class 2 0.02° / 0.03 Å |
+| cycle-1 average vs original cycle-0 average | CC **1.0000** (perturbed cycle-0 average: 0.840) |
+| time, cycle 0 on RTX A5000 | 33 s (average 6.5, classify 5.7, select 19.4 — global 10° search per class) |
+| stack | untouched (no drift beyond the margin) |
+
+Check project: `data/mim019_select_check/` (stack symlinked to `data/mim019_project/stack`).
+The pose source is a step parameter: `data/mim019_project/cycle-000` now shows classify/select missing and
+`08_final stale: pose_source <unset>→select`.
 
 ## Phase 1 task 4 — pose composition, `08_final`, `py3sta next` (2026-10-15)
 
@@ -176,6 +212,8 @@ Files: `data/align_test/` (B/compare_emdb.png shows the fit). EMDB map: `data/em
 
 ## Decisions
 
+- (2026-10-15) Class selection lives in the `select:` section of `cycle.yaml` (tracked like every parameter);
+  the planned `py3sta select` CLI / dashboard will only write that section. `target: each` comes in Phase 5.
 - (2026-10-15) No automatic fitting of `file` references (no `reference.fit`): the user aligns external maps
   with `py3sta align-maps` and provides the fitted map — routine practice.
 

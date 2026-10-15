@@ -59,7 +59,8 @@ def _dataset(tmp_path, n_tomos=5, n_per=8, noise_tomo="TS_04", seed=0):
 def proj(tmp_path):
     star = _dataset(tmp_path)
     p = init_project(tmp_path / "proj", star, backend="numpy", jobs=1, margin=3).project
-    _edit_yaml(p.cycle_dir(0) / "cycle.yaml", lambda c: c["reference"]["mask"].update(radius=[60.0], soft=10.0))
+    _edit_yaml(p.cycle_dir(0) / "cycle.yaml", lambda c: (c["reference"]["mask"].update(radius=[60.0], soft=10.0),
+                                                         c["select"].update(step=30.0, bin=1)))
     return load_project(p.root)
 
 
@@ -212,14 +213,14 @@ def test_upstream_rules(proj, monkeypatch):
 
     with pytest.raises(StepError, match="upstream step average is missing"):
         run_cycle(proj, 0, start="reference")
-    run_cycle(proj, 0)                                               # average + reference
+    run_cycle(proj, 0, stop="reference")                             # average + reference
     assert ran == [1] and step_state(proj, 0, "reference").state == "done"
     _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["average"].update(halves=False))
     st = step_state(proj, 0, "reference")
     assert st.state == "stale" and st.reasons == ["upstream average stale"]
     with pytest.raises(StepError, match="run with --from average"):
         run_cycle(proj, 0, start="reference")
-    run_cycle(proj, 0, start="reference", force=True)
+    run_cycle(proj, 0, start="reference", stop="reference", force=True)
     run_cycle(proj, 0, stop="average")                               # re-run upstream only
     st = step_state(proj, 0, "reference")
     assert st.state == "stale" and st.reasons == ["upstream average re-run"]
@@ -242,10 +243,12 @@ def test_status_and_cli(proj):
     assert st.drift_warning == 0 and st.cycles[0].n_particles == 40
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "reference", "--to", "reference"])
     assert r.exit_code == 0 and "1 reference(s)" in r.output, r.output
-    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "msa", "--to", "embed"])
+    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "msa", "--to", "msa"])
     assert r.exit_code != 0 and "no implemented step" in r.output
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "final"])
-    assert r.exit_code == 0 and "40 particles, poses from 00_input.star" in r.output, r.output
+    assert r.exit_code != 0 and "upstream step select is stale: upstream reference re-run" in r.output
+    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "select"])
+    assert r.exit_code == 0 and "40 particles, poses from select" in r.output, r.output
     r = CliRunner().invoke(main, ["next", str(proj.root), "cycle-000"])
     assert r.exit_code == 0 and "cycle-001: 40 particles from cycle-000_final.star" in r.output, r.output
     r = CliRunner().invoke(main, ["status", str(proj.root)])
@@ -290,9 +293,6 @@ def test_next_refuses_stale_final_and_keeps_edits(proj):
     rep = next_cycle(proj, 0)
     assert rep.warnings and "edited by hand" in rep.warnings[0]
     assert read_star(proj.cycle_input(1))["particles"].loc[3, "rlnAngleRot"] == b["particles"].loc[3, "rlnAngleRot"]
-    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["average"].update(normalize=False))
-    st = step_state(proj, 0, "final")
-    assert st.state == "done"                                       # final does not depend on the average
     cin = proj.cycle_input(0)
     b = read_star(cin)
     b["particles"].loc[0, "rlnAngleTilt"] += 1
@@ -318,21 +318,24 @@ def test_final_reads_pose_source(proj, monkeypatch):
         write_star(b, ctx.output_star("aligned.star"))
 
     fake = steps.Step("align", "03_align", ("reference",), lambda p, c: {}, fake_align, poses="aligned.star")
+    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["select"].update(align=[]))   # leave: poses kept
     new = tuple(fake if s.name == "align" else s for s in steps.STEPS)
     monkeypatch.setattr(steps, "STEPS", new)
     monkeypatch.setattr(runner, "STEPS", new)
     monkeypatch.setitem(steps.BY_NAME, "align", fake)
     run_cycle(proj, 0)
-    m = read_manifest(_final(proj).parent)
+    m = read_manifest(proj.cycle_dir(0) / "07_select")
     assert m["info"]["pose_source"] == "align" and "align" in m["inputs"]["steps"]
+    assert read_manifest(_final(proj).parent)["info"]["pose_source"] == "select"
     fin = read_star(_final(proj))["particles"]
     aligned = read_star(proj.cycle_dir(0) / "03_align" / "aligned.star")["particles"]
     np.testing.assert_allclose(fin["rlnAngleRot"], aligned["rlnAngleRot"])
     run_cycle(proj, 0, start="align", stop="align")
-    assert step_state(proj, 0, "final").reasons == ["upstream align re-run"]
+    assert "upstream align re-run" in step_state(proj, 0, "select").reasons
+    assert step_state(proj, 0, "final").reasons == ["upstream select stale"]
     a = proj.cycle_dir(0) / "03_align" / "aligned.star"
     b = read_star(a)
     b["particles"] = b["particles"].iloc[:-1]
     write_star(b, a)
     with pytest.raises(ValueError, match="1 particle"):
-        run_cycle(proj, 0, start="final")
+        run_cycle(proj, 0, start="classify")
