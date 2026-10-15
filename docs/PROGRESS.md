@@ -12,12 +12,33 @@ Done:
    re-crop; `01_average` from the stack with per-tomogram CC; CTF mode in `cycle.yaml`; `00_input.star`
    is a copy (2026-10-15, see below).
 
+3. ✅ Reference step (global, file, multi-reference) with masks + band-pass in Å; project-level
+   `invert_contrast` (2026-10-15, see below).
+
 Next concrete tasks:
-3. Reference step (global, file) with masks + band-pass in Å.
 4. Pose composition function + synthetic tests; `_final.star` writer; `py3sta next` (copies 00_input).
 5. Dummy classification from existing `rlnClassNumber` to run select/final end-to-end before the real engines exist.
 6. `py3sta flag` (the `py3staExcluded` filter itself is already honoured by `load_cycle_input`).
 7. `py3sta set-tomograms` STAR helper (swap reconstructions by `tomo_key()`).
+
+## Phase 1 task 3 — `02_reference`, contrast (2026-10-15)
+
+- `reference.py`: `make_mask` (sphere / ellipsoid / box / file; raised-cosine edge centred on the size, Å;
+  centre offset in Å), `bandpass` (raised-cosine edges, 3 Fourier shells), `fit_box` (pad/crop keeping
+  voxel n//2 → box//2), `prepare_reference` (invert → band-pass → normalise inside mask → mask),
+  `load_volumes` (MRC or MRC stack; voxel size must match, no resampling), `masked_cc`.
+- Step `02_reference`: upstream = `average` only in `global` mode (`Step.upstream` may depend on the
+  cycle config); `file` mode runs without an average. Outputs `references.mrcs` (float32), `references.star`
+  (source, file, invert, CC with the current average), `mask.mrc`. Negative CC → "contrast inverted?" warning.
+  `classes` mode refused until `select` exists. All references share one mask (as i3).
+- `invert_contrast` (project.yaml; `py3sta average --invert-contrast`): densities × −1 on read, both paths,
+  stack unchanged. `01_average` records `protein_contrast` (inside particle radius vs outer shell) and warns
+  when protein is dark.
+- Tests: 78 pass (`test_reference.py`: masks, band-pass, fit_box parity cases, MRC stacks, contrast,
+  step staleness, file mode without average, inverted-file warning, replaced file, invert_contrast).
+- MIM019: raw average reads `dark` (−1.3), with `invert_contrast: true` `light` (+1.4; project now uses it).
+  Global reference CC 1.000; user's `average.mrc` (box 64 → 72) CC −0.999 without `reference.invert`
+  (warned), 0.999 with; two-reference stack (user average + IsoNet average) CC 0.999 / 0.944.
 
 ## Phase 1 task 2 — manifests, stack, `01_average` (2026-10-15)
 
@@ -85,6 +106,12 @@ Next concrete tasks:
 - CTF height sign (`--ctf-height-sign`) not resolvable on one tomogram; test on multi-tomogram data.
 - BLAS matmul inside worker processes oversubscribed the CPU (−j4 slower than −j1); fixed with element-wise math.
 
+- (2026-10-15) **IsoNet-corrected tomograms** (`isonet_denoising/corrected_tomos`, isonet2 n2n unet-medium), 6002
+  particles, no wedge weighting (IsoNet fills the wedge): the map looks smoother and less detailed than raw.
+  Half-map FSC rises again above 0.045 1/Å (0.69 at 15 Å, 0.8 near Nyquist; raw falls to ~0.15): the
+  network output is correlated between half sets, so **FSC is not a valid resolution measure on IsoNet tomograms**.
+  CC with the raw-tomogram average 0.946. Files: `data/isonet_average/`.
+
 ## Decisions
 
 - (2026-10-15) No content hashing of large files: run ids between steps, size/mtime for external files.
@@ -92,6 +119,9 @@ Next concrete tasks:
 - (2026-10-15) No tomogram sets: tomogram paths live only in the STAR file (edit `00_input.star` to switch
   reconstructions); the CTF mode moves to `cycle.yaml`. `00_input.star` is a copy, not a link.
 - (2026-10-15) Running a step with a stale/missing/failed upstream is refused unless `--force`.
+- (2026-10-15) References are full maps (no half-set references). Multi-reference alignment (Phase 2): every
+  particle against all references, best CC kept (index → `rlnClassNumber`).
+- (2026-10-15) White-on-black via project-level `invert_contrast` (applied on read; stack keeps raw values).
 - (2026-10-15) Normalisation per particle inside `particle_radius` (Å, project.yaml; default half the box),
   separate from the masks of later steps. Subvolumes are zero outside the extraction sphere (box//2 − 1).
 - (2026-10-15) Stack = raw **unrotated** float16 crops (box + 2·margin, margin 4 voxels), project-level,

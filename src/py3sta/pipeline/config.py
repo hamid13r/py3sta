@@ -63,6 +63,7 @@ class ProjectConfig:
     ts_apix: float                              # Å, pixel size of rlnCoordinate* (STAR)
     input_star: str = "input.star"              # relative to the project directory
     particle_radius: typing.Optional[float] = None  # Å, normalisation sphere; null = half the box
+    invert_contrast: bool = False               # true: densities * -1 on read (WBP tomograms -> protein white)
     wedge: WedgeConfig = field(default_factory=WedgeConfig)
     stack: StackSettings = field(default_factory=StackSettings)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
@@ -117,7 +118,8 @@ class MaskConfig:
 @dataclass
 class ReferenceConfig:
     mode: str = "global"                        # global | file | classes
-    files: typing.List[str] = field(default_factory=list)  # mode: file
+    files: typing.List[str] = field(default_factory=list)  # mode: file (MRC volumes or MRC volume stacks)
+    invert: bool = False                        # flip the contrast of the reference files
     lowpass: typing.Optional[float] = 30.0      # Å, null = off
     highpass: typing.Optional[float] = None     # Å, null = off
     mask: MaskConfig = field(default_factory=MaskConfig)
@@ -144,6 +146,7 @@ class CycleConfig:
         r = self.reference
         err.choice(r.mode, REFERENCE_MODES, "reference.mode")
         err.check(r.mode != "file" or r.files, "reference.files", "mode 'file' needs at least one MRC file")
+        err.check(r.mode != "classes", "reference.mode", "'classes' is not implemented yet (comes with select, Phase 5)")
         for key, v in (("lowpass", r.lowpass), ("highpass", r.highpass)):
             err.check(v is None or v > 0, f"reference.{key}", f"must be > 0 Å or null (got {v})")
         if r.lowpass and r.highpass:
@@ -191,6 +194,7 @@ PROJECT_HEADER = """\
 # py3sta project configuration
 # box: voxels at the tomogram pixel size; apix / ts_apix: Å (tomogram voxel / STAR coordinates)
 # particle_radius: Å, sphere for per-particle normalisation (null = half the box)
+# invert_contrast: true multiplies densities by -1 when particles are read (WBP tomograms: protein becomes white)
 # wedge.sign: auto | 1 | -1;  stack.margin: voxels per side (drift allowance);  stack.dtype: float16 | float32
 # compute.backend: numpy | torch;  compute.gpu: index or 'cpu';  compute.jobs: 0 = all cores
 """
@@ -199,7 +203,7 @@ CYCLE_HEADER = """\
 # py3sta cycle configuration (copied to the next cycle by 'py3sta next', then edit)
 # ctf.mode: none | flip | wiener | amplitude -- belongs to the tomograms in 00_input.star ('py3sta ctf-check')
 # All sizes in Å.  reference.mode: global | file | classes;  mask.shape: sphere | ellipsoid | box | file
-# mask.radius: 1 value (sphere) or 3 (ellipsoid / box half-sizes)
+# mask.radius: 1 value (sphere) or 3 (ellipsoid / box half-sizes); reference.invert flips reference files only
 """
 
 

@@ -167,7 +167,7 @@ def average_particles_torch(ps, tomograms: dict | None, box: int, rotate: bool =
                             dose_weight: bool = False, wiener_eps: float = 0.05,
                             device=None, batch: int = 32, ctf_mode: str | None = None,
                             height_sign: float = 1.0, jobs=None, norm_radius: float | None = None,
-                            stack=None, per_tomo: bool = False) -> AverageResult:
+                            stack=None, per_tomo: bool = False, invert: bool = False) -> AverageResult:
     """Same semantics as average.average_particles, on the GPU (also from a ``stack``)."""
     device = torch.device(device) if device is not None else default_device()
     grid = box_grid_t(box, device)
@@ -212,6 +212,8 @@ def average_particles_torch(ps, tomograms: dict | None, box: int, rotate: bool =
                 sub, ins = sample_cubes(cubes, loc.lo[bi], tshape, cb, mats_all[bi], box, device, grid)
             ins = ins * sphere
             sub = sub * sphere
+            if invert:
+                sub = -sub
             ok = (ins.sum((1, 2, 3)) / n_sphere >= min_inside).cpu().numpy()
             skipped += int((~ok).sum())
             if not ok.any():

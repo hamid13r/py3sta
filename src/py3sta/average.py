@@ -105,9 +105,12 @@ def sphere_mask(box: int, radius_vox: float) -> np.ndarray:
     return (r <= radius_vox).astype(np.float32)
 
 
-def prepare_subvolume(sub, w, sphere, norm_mask, normalize: bool):
-    """Restrict to the extraction sphere and normalise to mean 0 / std 1 over the voxels inside both
-    the tomogram and the particle-radius sphere (``norm_mask``). Returns (sub, w, inside_fraction)."""
+def prepare_subvolume(sub, w, sphere, norm_mask, normalize: bool, invert: bool = False):
+    """Restrict to the extraction sphere, flip the contrast if ``invert`` (protein white on black), and
+    normalise to mean 0 / std 1 over the voxels inside both the tomogram and the particle-radius sphere
+    (``norm_mask``). Returns (sub, w, inside_fraction)."""
+    if invert:
+        sub = -sub
     w = w * sphere
     inside = float(w.sum() / sphere.sum())
     if normalize:
@@ -160,7 +163,7 @@ def _stack_memmap(path, size):
 
 
 def _accumulate(src, centres, mats, halves, box, normalize, min_inside, tilt, dose_weight,
-                ctf_mode=None, height_sign=1.0, norm_radius=None):
+                ctf_mode=None, height_sign=1.0, norm_radius=None, invert=False):
     """Worker: partial sums for one chunk of particles of one tomogram (runs in a subprocess).
 
     src: ("tomo", path) or ("stack", path, crop size, rows, crop lo (n,3), tomogram shape, apix).
@@ -183,7 +186,7 @@ def _accumulate(src, centres, mats, halves, box, normalize, min_inside, tilt, do
     skipped = 0
     for k, (c, M, h) in enumerate(zip(centres, mats, halves)):
         sub, w = sample(k, c, M)
-        sub, w, inside = prepare_subvolume(sub, w, sphere, nmask, normalize)
+        sub, w, inside = prepare_subvolume(sub, w, sphere, nmask, normalize, invert)
         if inside < min_inside:
             skipped += 1
             continue
@@ -204,14 +207,16 @@ def average_particles(ps: ParticleSet, tomograms: dict | None, box: int, rotate:
                       tilts: dict | None = None, dose_weight: bool = False,
                       wiener_eps: float = 0.05, jobs: int = 1, chunk: int | None = None,
                       ctf_mode: str | None = None, height_sign: float = 1.0,
-                      norm_radius: float | None = None, stack=None, per_tomo: bool = False) -> AverageResult:
+                      norm_radius: float | None = None, stack=None, per_tomo: bool = False,
+                      invert: bool = False) -> AverageResult:
     """Global average of all particles.
 
     tomograms: {rlnTomoName: path}; or ``stack`` (stack.ParticleStack): particles are sampled
     from their stored crops instead (same result, see extract_crop). Subvolumes are defined inside
     the extraction sphere (radius box//2 - 1); particles with < ``min_inside`` of that sphere inside
     the tomogram are skipped. normalize: mean 0 / std 1 over the voxels within ``norm_radius``
-    (voxels; default: the extraction sphere). Half maps follow rlnRandomSubset (else alternate rows).
+    (voxels; default: the extraction sphere). invert: multiply densities by -1 (white-on-black).
+    Half maps follow rlnRandomSubset (else alternate rows).
 
     tilts: {rlnTomoName: TiltInfo}. If given, the average is wedge-weighted in
     Fourier space:  F = sum(w_i F_i) / max(sum(w_i^2), wiener_eps * n),
@@ -251,7 +256,8 @@ def average_particles(ps: ParticleSet, tomograms: dict | None, box: int, rotate:
                        loc.tomo_shape[tomo], apix)
             tasks.append((src, centres[sl], np.ascontiguousarray(mats_all[idx[sl]]),
                           halves_all[idx[sl]], box, normalize, min_inside,
-                          None if tilts is None else tilts[tomo], dose_weight, ctf_mode, height_sign, norm_radius))
+                          None if tilts is None else tilts[tomo], dose_weight, ctf_mode, height_sign, norm_radius,
+                          invert))
             task_tomo.append(tomo)
 
     S = W = None
@@ -304,6 +310,19 @@ def _finisher(box, fourier: bool, wiener_eps: float):
         def fin(Sr, Wt, n):
             return (Sr / np.maximum(Wt, 1e-6)).astype(np.float32)
     return fin
+
+
+def protein_contrast(vol, radius_vox: float) -> tuple[str, float]:
+    """'light' if the mean density inside ``radius_vox`` exceeds that of the shell between it and the
+    extraction sphere (protein white on black), else 'dark'. Returns (label, inside - shell in std units)."""
+    box = vol.shape[0]
+    r = np.sqrt((box_grid(box) ** 2).sum(-1))
+    inner = r <= radius_vox
+    shell = (r > radius_vox) & (r <= box // 2 - 1)
+    if not shell.any():                       # particle radius = half box: compare the inner half
+        inner, shell = r <= radius_vox / 2, (r > radius_vox / 2) & (r <= box // 2 - 1)
+    d = float((vol[inner].mean() - vol[shell].mean()) / (vol[inner | shell].std() or 1))
+    return ("light" if d > 0 else "dark"), d
 
 
 def per_tomo_cc(res: AverageResult, radius_vox: float, lowpass_A: float | None = None, min_particles: int = 5):

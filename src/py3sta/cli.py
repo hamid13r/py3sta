@@ -268,12 +268,13 @@ def star2warp(star, ts_apix, output, suffix):
 @click.option("--ctf-height-sign", type=float, default=1.0, show_default=True,
               help="Direction of the per-particle defocus offset with height (1, -1, or 0 to ignore height).")
 @click.option("--particle-radius", type=float, help="Radius (Å) of the per-particle normalisation sphere. Default: half the box.")
+@click.option("--invert-contrast", is_flag=True, help="Multiply densities by -1 (protein white on black, for WBP tomograms).")
 @click.option("--backend", type=click.Choice(["numpy", "torch"]), default="numpy", show_default=True)
 @click.option("-j", "--jobs", type=int, default=0, help="CPU worker processes for the numpy backend (0 = all cores).")
 @click.option("--gpu", default="0", show_default=True,
               help="GPU for --backend torch: index (0, 1, ...) or 'cpu'. Indices follow CUDA_VISIBLE_DEVICES.")
 def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halves, tilt_files, wedge_sign,
-            dose_weight, particle_radius, backend, jobs, gpu, no_wedge, ctf_mode, ctf_height_sign):
+            dose_weight, particle_radius, invert_contrast, backend, jobs, gpu, no_wedge, ctf_mode, ctf_height_sign):
     """Extract particles from tomograms and write the global average.
 
     Tomograms are read from the STAR file's rlnMicrographName (paths as written,
@@ -325,7 +326,7 @@ def average(star, tomograms, box, ts_apix, output, no_rotate, no_normalize, halv
     if particle_radius:
         norm_radius = particle_radius / read_header(next(iter(tomo_map.values())))["apix"]
     kw = dict(rotate=not no_rotate, normalize=not no_normalize, progress=prog, tilts=tilts, dose_weight=dose_weight,
-              ctf_mode=ctf_mode, height_sign=ctf_height_sign, norm_radius=norm_radius)
+              ctf_mode=ctf_mode, height_sign=ctf_height_sign, norm_radius=norm_radius, invert=invert_contrast)
     if backend == "torch":
         import torch
 

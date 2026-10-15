@@ -57,6 +57,9 @@ project/
 - **External files** (tomograms, Warp XML, reference/mask MRCs, `input.star`): size + mtime. A
   different file at the same tomogram path → those crops are re-made and the cycle's steps are stale.
 - **Compute settings** (backend, GPU, jobs) are not parameters: numpy and torch agree to ~1e-6.
+- **Contrast:** `invert_contrast` (project.yaml) multiplies densities by −1 when crops are read, so every
+  step sees protein white on black (RELION / Warp / ChimeraX convention); the stack keeps raw values.
+  `01_average` reports the contrast it sees and warns if protein is dark.
 - **Files changed during a run:** a step re-checks the size/mtime of its tomograms at the end; a change →
   `failed: tomogram X changed during the run` (memmapped reads may have mixed old and new data).
 
@@ -88,11 +91,13 @@ keeps ~80 % amplitude per pass at half Nyquist, ~27 Å on MIM019).
 1. **Average** — poses of `00_input.star` applied to the crops (wedge, dose, CTF per `cycle.yaml`);
    half maps, FSC, per-tomogram CC (each tomogram's average vs the others', flags outliers).
 2. **Reference(s)** — mode `global` | `classes` (selected class averages of previous cycle) | `file` (one or
-   more MRCs). Masked (sphere/ellipsoid/box/file, soft edge) and band-passed (Å) → reference stack.
-   Multi-reference = N > 1.
+   more MRCs or MRC stacks, fitted to the box, optional `invert`). Masked (sphere/ellipsoid/box/file, soft
+   edge) and band-passed (Å) → `references.mrcs` + `references.star` (CC with the current average; negative
+   CC warns about inverted contrast). Multi-reference = N > 1; full maps (no half-set references, decided).
 3. **Align (optional MRA)** — crops vs reference(s) rotated by each pose, searching small deltas around the
-   current pose; result = delta pose composed onto current pose → `aligned.star`. Can be disabled
-   (translation-only or skip, like i3 practice).
+   current pose; result = delta pose composed onto current pose → `aligned.star`. With N references every
+   particle is aligned to all of them and keeps the best CC (reference index → `rlnClassNumber`, score →
+   `py3staRefCC`). Can be disabled (translation-only or skip, like i3 practice).
 4. **MSA / dimensionality reduction** — on a per-cycle rotated, masked, binned MSA stack made from the crops.
    - **PCA** (randomized SVD, GPU): masked, band-passed stack; default *wedge-masked differences*
      (particle − wedge-applied average) so missing-wedge factors disappear; plain PCA available for i3 parity.

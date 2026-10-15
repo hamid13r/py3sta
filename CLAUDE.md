@@ -17,6 +17,7 @@ src/py3sta/
   wedge.py           TiltInfo (Warp XML / .tlt), missing wedge, dose, CTF (CTFParams, particle_defocus, ctf_transfer)
   average.py         extract (trilinear), average_particles (multiprocess, wedge/dose/CTF Wiener), fsc, path resolution
   backend_torch.py   PyTorch/CUDA mirror of extract/wedge/average (must stay numerically equal to numpy)
+  reference.py       masks (sphere/ellipsoid/box/file, soft edges in Å), band-pass, fit_box, prepare_reference
   stack.py           project particle stack: unrotated float16 crops, refresh_stack (new / tomogram changed / drift)
   cli.py             click CLI: init run status stack pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
   io/                star.py (dependency-free STAR), mrc.py (numpy MRC), trf.py (i3), dipole.py (.pos picks),
@@ -61,6 +62,8 @@ python scripts/check_torch.py STAR TOMO --tilt XML --gpu 0
 - **Averaging:** Fourier Wiener `Σ w·F / max(Σ w², eps·n)`; half sets from `rlnRandomSubset`, else alternate rows.
   Subvolumes are zero outside the extraction sphere (radius box//2 − 1) and normalised per particle inside
   `particle_radius`. The stack (`stack/`) holds unrotated crops; poses are applied on use (one interpolation).
+- **Contrast:** `invert_contrast` (project.yaml) flips densities on read → protein white on black everywhere
+  downstream; the stack keeps raw tomogram values. External reference files have their own `reference.invert`.
 - **Parallel CPU:** `average_particles(jobs=N)` uses processes; avoid BLAS calls in workers (oversubscription
   made -j4 slower than -j1 once — use element-wise math).
 - **Units:** Å for physical sizes in user-facing options; voxels internally; angles in degrees.

@@ -76,7 +76,7 @@ def run_cycle(project: Project, n: int, start: str | None = None, stop: str | No
     if not force:
         cache = {}
         for s in todo:
-            for up in s.upstream:
+            for up in s.upstream_for(cycle_cfg):
                 if up in {t.name for t in todo}:
                     continue
                 us = step_state(project, n, up, cache)
@@ -86,11 +86,11 @@ def run_cycle(project: Project, n: int, start: str | None = None, stop: str | No
     _, device = resolve_device(project.config.compute)
     out = []
     for s in todo:
-        log(f"cycle-{n:03d} {s.folder}: running on {device}")
+        log(f"cycle-{n:03d} {s.folder}: running")
         folder = project.cycle_dir(n) / s.folder
 
         def fn(ctx, s=s):
-            for up in s.upstream:
+            for up in s.upstream_for(cycle_cfg):
                 m = step_state(project, n, up).manifest
                 if m:
                     ctx.use_step(up, m["run_id"])

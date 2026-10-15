@@ -15,13 +15,16 @@ from .config import CycleConfig, ProjectConfig
 class Step:
     name: str
     folder: str
-    upstream: tuple = ()
+    upstream: object = ()             # tuple of step names, or (CycleConfig) -> tuple (mode-dependent)
     params: object = None             # (ProjectConfig, CycleConfig) -> dict
     run: object = None                # (StepContext, Project, n, CycleConfig) -> None
 
     @property
     def implemented(self) -> bool:
         return self.run is not None
+
+    def upstream_for(self, cycle_cfg) -> tuple:
+        return tuple(self.upstream(cycle_cfg) if callable(self.upstream) else self.upstream)
 
 
 def resolve_device(compute) -> tuple[object, str]:
@@ -47,11 +50,11 @@ def resolve_device(compute) -> tuple[object, str]:
 def average_params(p: ProjectConfig, c: CycleConfig) -> dict:
     return {"average": dataclasses.asdict(c.average), "ctf": dataclasses.asdict(c.ctf),
             "wedge": dataclasses.asdict(p.wedge), "box": p.box, "apix": p.apix, "ts_apix": p.ts_apix,
-            "particle_radius": p.norm_radius_vox * p.apix}
+            "particle_radius": p.norm_radius_vox * p.apix, "invert_contrast": p.invert_contrast}
 
 
 def run_average(ctx, project, n: int, c: CycleConfig) -> None:
-    from ..average import fsc, per_tomo_cc, resolution_at
+    from ..average import fsc, per_tomo_cc, protein_contrast, resolution_at
     from ..io.mrc import write_mrc
     from ..stack import ParticleStack
     from ..wedge import TiltInfo
@@ -73,7 +76,7 @@ def run_average(ctx, project, n: int, c: CycleConfig) -> None:
     stack = ParticleStack.open(project.stack_dir)
     kw = dict(normalize=c.average.normalize, tilts=tilts, dose_weight=p.wedge.dose_weight,
               ctf_mode=None if c.ctf.mode == "none" else c.ctf.mode, height_sign=c.ctf.height_sign,
-              norm_radius=p.norm_radius_vox, stack=stack, per_tomo=True)
+              norm_radius=p.norm_radius_vox, stack=stack, per_tomo=True, invert=p.invert_contrast)
     device, _ = resolve_device(p.compute)
     ctx.log(f"averaging {len(cin.particles)} particles from the stack ({cin.n_excluded} excluded)")
     if device is None:
@@ -95,6 +98,12 @@ def run_average(ctx, project, n: int, c: CycleConfig) -> None:
         r, f = fsc(*res.halves, res.apix)
         np.savetxt(ctx.output("fsc.txt"), np.column_stack([r, f]), fmt="%.4f", header="resolution_A FSC")
         info.update(fsc143_first=round(resolution_at(r, f), 1), fsc143_last=round(resolution_at(r, f, mode="last"), 1))
+    label, d = protein_contrast(res.average, p.norm_radius_vox)
+    info.update(protein_contrast=label)
+    if label == "dark":
+        ctx.warn("protein appears dark (black on white)"
+                 + ("; set invert_contrast: true in project.yaml for white on black" if not p.invert_contrast
+                    else " although invert_contrast is true: check the tomograms"))
     cc = per_tomo_cc(res, p.norm_radius_vox, c.average.cc_lowpass)
     cc.to_csv(ctx.output("per_tomo.csv"), index=False, float_format="%.4f")
     flagged = cc.loc[cc["flagged"], "tomo"].tolist()
@@ -103,10 +112,69 @@ def run_average(ctx, project, n: int, c: CycleConfig) -> None:
         ctx.warn(f"low per-tomogram CC: {', '.join(flagged)} (see per_tomo.csv)")
 
 
+# --------------------------------------------------------------- reference
+def reference_upstream(c: CycleConfig) -> tuple:
+    return ("average",) if c.reference.mode == "global" else ()
+
+
+def reference_params(p: ProjectConfig, c: CycleConfig) -> dict:
+    return {"reference": dataclasses.asdict(c.reference), "box": p.box, "apix": p.apix}
+
+
+def run_reference(ctx, project, n: int, c: CycleConfig) -> None:
+    import pandas as pd
+
+    from ..io.mrc import open_volume_stack, read_mrc, write_mrc
+    from ..io.star import write_star
+    from ..reference import load_volumes, make_mask, masked_cc, prepare_reference, resolve_file
+
+    p, r = project.config, c.reference
+    m = r.mask
+    mask_file = None
+    if m.shape == "file":
+        mask_file = resolve_file(m.file, project.root)
+        ctx.use_files([mask_file], "mask")
+    mask = make_mask(p.box, p.apix, m.shape, m.radius, m.soft, m.center, mask_file)
+    avg_path = project.cycle_dir(n) / "01_average" / "average.mrc"
+    average = read_mrc(avg_path, mmap=False)[0] if avg_path.is_file() else None
+
+    sources = []                                     # (volume, source, file, invert)
+    if r.mode == "global":
+        if average is None:
+            raise FileNotFoundError(f"{avg_path}: run the average step first")
+        sources.append((average, "global", str(avg_path), False))
+    else:
+        for name in r.files:
+            f = resolve_file(name, project.root)
+            ctx.use_files([f], "reference file")
+            vols = load_volumes(f, p.box, p.apix)
+            sources += [(v, "file", f"{f}" + (f"#{k + 1}" if len(vols) > 1 else ""), r.invert) for k, v in enumerate(vols)]
+
+    refs = np.stack([prepare_reference(v, p.apix, mask, r.lowpass, r.highpass, inv) for v, _, _, inv in sources])
+    data = open_volume_stack(ctx.output("references.mrcs"), len(refs), p.box, np.float32, p.apix, mode="w+")
+    data[:] = refs
+    data.flush()
+    write_mrc(ctx.output("mask.mrc"), mask, p.apix)
+    rows = []
+    avg_f = prepare_reference(average, p.apix, mask, r.lowpass, r.highpass) if average is not None else None
+    for k, (ref, (_, src, f, inv)) in enumerate(zip(refs, sources), 1):
+        cc = masked_cc(ref, avg_f, mask) if avg_f is not None else np.nan
+        rows.append({"py3staReferenceIndex": k, "py3staReferenceSource": src, "py3staReferenceFile": f,
+                     "py3staReferenceInvert": int(inv), "py3staReferenceCC": round(float(cc), 4)})
+        if src == "file" and cc < 0:
+            ctx.warn(f"reference {k} anti-correlates with the current average (CC {cc:.2f}): "
+                     "contrast inverted? set reference.invert")
+    write_star({"references": pd.DataFrame(rows)}, ctx.output_star("references.star"))
+    ctx.info.update(n_references=len(refs), mask_fraction=round(float(mask.mean()), 4),
+                    cc_with_average=[row["py3staReferenceCC"] for row in rows])
+    ctx.log(f"{len(refs)} reference(s); CC with the current average: "
+            + ", ".join(f"{row['py3staReferenceCC']:.3f}" for row in rows))
+
+
 # ------------------------------------------------------------------- order
 STEPS: tuple[Step, ...] = (
     Step("average", "01_average", (), average_params, run_average),
-    Step("reference", "02_reference", ("average",)),
+    Step("reference", "02_reference", reference_upstream, reference_params, run_reference),
     Step("align", "03_align", ("reference",)),
     Step("msa", "04_msa", ("align",)),
     Step("classify", "05_classify", ("msa",)),
