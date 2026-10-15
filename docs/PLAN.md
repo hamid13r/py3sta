@@ -38,8 +38,8 @@ project/
 - Running a step whose upstream is stale / missing / failed is refused with a hint
   (`run --from <upstream>`), unless `--force` (decided 2026-10-15).
 - Tomogram paths live only in the STAR file (`rlnMicrographName`); to switch reconstructions (raw WBP →
-  novaCTF) edit the cycle's `00_input.star` (helper: `py3sta set-tomograms in.star DIR -o out.star`,
-  matching by `tomo_key()`). The CTF mode belongs to the reconstruction and is set in `cycle.yaml`.
+  novaCTF) edit the cycle's `00_input.star` (no helper command, decided 2026-10-15). The CTF mode belongs to
+  the reconstruction and is set in `cycle.yaml`.
 
 ### Staleness and change tracking (decided 2026-10-15)
 
@@ -139,6 +139,8 @@ keeps ~80 % amplitude per pass at half Nyquist, ~27 Å on MIM019).
 - They stay excluded until the user changes the flag back: `py3sta flag cycle-003 --include <selection>`
   (selection by class of a given cycle, lasso group, particle names, or a STAR file), or by editing the column.
 - `py3sta flag` also supports `--exclude` for manual exclusion; `status` reports active / excluded counts.
+  (done: edits the cycle's `00_input.star`; selections `class:CYCLE:K`, `tomo:NAME`, `excluded:CYCLE`,
+  `file:PATH`, `all`; `--dry-run`; log in `cycle-NNN/flag.log`. Lasso groups come with the explorer.)
 
 ### CLI sketch
 

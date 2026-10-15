@@ -20,9 +20,31 @@ Done:
 5. ✅ `05_classify` (method `column`) + minimal `07_select` (align / leave / exclude, target reference or MRC):
    full cycle average → reference → classify → select → final → next runs end to end (2026-10-15, see below).
 
-Next concrete tasks:
-6. `py3sta flag` (the `py3staExcluded` filter itself is already honoured by `load_cycle_input`).
-7. `py3sta set-tomograms` STAR helper (swap reconstructions by `tomo_key()`).
+6. ✅ `py3sta flag` (2026-10-15, see below). Task 7 (`set-tomograms` helper) dropped by the user: tomogram
+   paths live in the STAR file and are edited there.
+
+Next: Phase 2 particle alignment (MRA, `03_align`) — see PLAN.md §2 step 3 and §3.
+
+## Phase 1 task 6 — `py3sta flag` (2026-10-15)
+
+- `pipeline/flags.py` (`flag_particles`, `select_particles`), CLI `py3sta flag PROJECT CYCLE --exclude SEL
+  --include SEL [--dry-run]`. Edits the cycle's `00_input.star` in place (tracked as a STAR edit: the cycle's
+  steps become stale with "00_input.star changed"); one line per change in `cycle-NNN/flag.log`.
+- Selections: `class:CYCLE:K[,K]` (final STAR of that cycle, else `selected.star`), `tomo:NAME[,NAME]`,
+  `excluded:CYCLE` (`py3staExcludedCycle`), `file:PATH` (STAR with `rlnTomoParticleName` or one name per line),
+  `all`. Unknown classes / tomograms / names, a particle in both lists, or a running step are errors.
+- exclude sets `py3staExcluded = 1`, `py3staExcludedCycle = CYCLE`; include sets 0 and keeps the cycle (history).
+
+| MIM019 check (`data/mim019_select_check` cycle 1; exclude the 3 low-CC tomograms) | all | 3 excluded |
+|---|---|---|
+| particles used | 6002 | 5691 (313 flagged) |
+| FSC 0.5 | 24.9 Å | 24.8 Å |
+| FSC 0.143 (first crossing) | 16.3 Å | 16.3 Å |
+| FSC 30–18 Å | — | +0.001 to +0.014 |
+| per-tomogram CC median / flagged | 0.947 / 3 | 0.949 / none |
+
+The "last 0.143 crossing" changed 13.3 → 16.3 Å only because the FSC hovers at the threshold (0.146 vs 0.141
+at 13.3 Å): report the first crossing.
 
 ## Phase 1 task 5 — `05_classify` (column) + minimal `07_select` (2026-10-15)
 

@@ -224,6 +224,41 @@ def status(project_dir):
             click.echo(f"  (not implemented yet: {', '.join(pending)})")
 
 
+@main.command()
+@click.argument("project_dir")
+@click.argument("cycle")
+@click.option("--exclude", "exclude", multiple=True, metavar="SEL", help="Particles to exclude (repeatable).")
+@click.option("--include", "include", multiple=True, metavar="SEL", help="Particles to include again (repeatable).")
+@click.option("--dry-run", is_flag=True, help="Report what would change; write nothing.")
+def flag(project_dir, cycle, exclude, include, dry_run):
+    """Exclude / include particles in CYCLE's 00_input.star (the cycle's steps become stale).
+
+    \b
+    SEL: class:CYCLE:K[,K..]   class numbers of that cycle's final (or select) STAR
+         tomo:NAME[,NAME..]    tomograms
+         excluded:CYCLE        particles excluded in that cycle
+         file:PATH             STAR with rlnTomoParticleName, or one name per line
+         all"""
+    import sys
+
+    from .pipeline import ConfigError, load_project
+    from .pipeline.flags import flag_particles
+    from .pipeline.project import cycle_dirname
+
+    n = _cycle_number(cycle)
+    try:
+        rep = flag_particles(load_project(project_dir), n, exclude, include, dry_run, " ".join(sys.argv))
+    except ConfigError as e:
+        raise click.ClickException(str(e))
+    head = "dry run: would change" if dry_run else ("changed" if rep.written else "nothing changed")
+    click.echo(f"{head}: +{rep.newly_excluded} excluded, +{rep.newly_included} included "
+               f"({rep.unchanged} selected already in that state)")
+    click.echo(f"{cycle_dirname(n)}: excluded {rep.excluded_before} -> {rep.excluded_after} of {rep.n_particles}; "
+               f"active {rep.n_particles - rep.excluded_after}")
+    if rep.written and rep.stale_steps:
+        click.echo(f"steps now stale: {', '.join(rep.stale_steps)} (re-run with 'py3sta run {project_dir} {n}')")
+
+
 @main.command("next")
 @click.argument("project_dir")
 @click.argument("cycle")
