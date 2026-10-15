@@ -10,7 +10,12 @@ Done:
 1. ✅ `project.yaml` / `cycle.yaml` schema + loader with validation; `py3sta init` (2026-10-14, see below).
 
 Next concrete tasks:
-2. Cycle folder + `manifest.json` + `py3sta status` (done / stale / missing).
+1b. Tomogram sets (PLAN.md §1): move `ctf` from project level into named sets; `cycle.yaml: tomograms:`;
+    `py3sta tomo-set add`. Small change to task 1's config — do before task 2.
+2. Cycle folder + `manifest.json` + `py3sta status` (done / stale / missing / running / failed / edited);
+   run ids between steps, fingerprints for user-editable STAR files, size/mtime for external files,
+   tomogram re-check at the end of a run, `--force` + backup when re-running over an edited STAR
+   (PLAN.md §1 "Staleness and change tracking"). Wire the existing average in as step 01, with per-tomogram CC.
 3. Reference step (global, file) with masks + band-pass in Å.
 4. Stack step: pre-rotated `stack.mrcs` (float16) + `stack.star`, CPU multiprocess + torch.
 5. Pose composition function + synthetic tests; `_final.star` writer; `py3sta next`.
@@ -48,6 +53,10 @@ Next concrete tasks:
 - BLAS matmul inside worker processes oversubscribed the CPU (−j4 slower than −j1); fixed with element-wise math.
 
 ## Decisions
+
+- (2026-10-15) No content hashing of large files: run ids between steps, size/mtime for external files.
+  STAR files stay user-editable: fingerprinted (hash only when size/mtime changed), edits tracked, never lost.
+- (2026-10-15) Tomogram source is chosen per cycle from named tomogram sets, each with its own CTF mode.
 
 - Package/CLI name `py3sta` (GitHub `hamid13r/py3sta`); renaming later is cheap (SAGA was the favourite alternative).
 - RELION 4 particle format; Warp export via minimal STAR (`star2warp`).

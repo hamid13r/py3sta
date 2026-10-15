@@ -12,7 +12,7 @@ real data (MIM019) and synthetic tests.
 
 ```
 project/
-  project.yaml               # tomogram source, box, pixel size, CTF mode, masks, device, jobs
+  project.yaml               # tomogram sets (+ CTF mode per set), box, pixel size, wedge, device, jobs
   input.star                 # starting particles (rlnMicrographName -> tomogram, rlnWarpXMLfile -> tilts/CTF)
   cycle-000/
     cycle.yaml               # parameters of this cycle (copied from previous cycle by `next`, then edited)
@@ -29,9 +29,55 @@ project/
 ```
 
 - Every step reads only its upstream outputs and writes its own folder + `manifest.json`
-  (parameters, input hashes, versions, timing). Re-running a step overwrites its folder and marks
-  downstream steps stale. `py3sta status` shows done/stale/missing.
-- Config: YAML, validated (pydantic or dataclasses + explicit checks), clear error messages, units in Å.
+  (parameters, inputs, outputs, run id, versions + git commit, device, timing, status
+  running/done/failed). Re-running a step overwrites its folder and marks downstream steps stale.
+  `py3sta status` shows done / stale / missing / running / failed / edited.
+- Config: YAML, validated (dataclasses + explicit checks), clear error messages, units in Å.
+
+### Staleness and change tracking (decided 2026-10-15)
+
+- **Parameters:** each manifest stores its slice of `cycle.yaml` / `project.yaml`; any difference → stale.
+- **Binary outputs between steps** (`stack.mrcs`, MRCs): run ids. A step records the run id of each
+  upstream step it used; upstream re-run → new id → downstream stale. No hashing of large files.
+- **STAR files are user-editable.** Writer and readers record a fingerprint (size, mtime, sha1; the hash
+  is computed only when size/mtime changed, so `touch`/copy is not an edit).
+  - Edited output → producer shows `done (edited: aligned.star)`; every reader of the old version is stale.
+  - An edited STAR is re-validated (parses, required columns) before the next step uses it.
+  - Re-running a step whose STAR output was edited needs `--force`; the edited version is first saved as
+    `<name>.edited-<date>.star`. Edits are never lost silently.
+  - `00_input.star` is a link (to `input.star` or the previous `_final.star`): editing it edits the target.
+    To edit one cycle only, replace the link by a copy; `status` shows link vs copy.
+  - `py3sta flag` is just a recorded STAR edit.
+- **External files** (tomograms, Warp XML, reference/mask MRCs, `input.star`): size + mtime.
+- **Files changed during a run:** a step re-checks the size/mtime of its tomograms at the end; a change →
+  `failed: tomogram X changed during the run` (memmapped reads may have mixed old and new data).
+
+### Tomogram sets (decided 2026-10-15)
+
+The tomogram source can change between cycles (e.g. raw WBP → novaCTF), and the CTF mode belongs to
+the reconstruction, so both move from the project level into named sets:
+
+```yaml
+# project.yaml
+tomograms:
+  warp:    {from: star, ctf: amplitude}           # rlnMicrographName
+  novactf: {files: /data/.../nova/*.mrc, ctf: none}
+  etomo:   {files: /data/.../etomo/, ctf: flip}
+# cycle.yaml
+tomograms: novactf                                  # default: the set chosen at init
+```
+
+- Files are matched to particles by `tomo_key()` (folder or glob, as `add-xml`). Wedge and per-tilt
+  defocus still come from the Warp XML (same tilt series).
+- `py3sta tomo-set add NAME --files ... --ctf MODE`: every tomogram in `input.star` must have a file;
+  voxel size must equal the project's (box is in voxels; other binnings need a box in Å — later).
+- The set name + its files' size/mtime are step parameters: switching sets, or replacing one tomogram
+  file, makes only the current cycle's average/stack stale; `status` names the changed tomogram.
+- A replaced tomogram with a different volume size/origin → warning (coordinates may not fit a new
+  tilt-series alignment). The average step records **per-tomogram CC with the reference**; `status` flags
+  a tomogram whose CC drops sharply (catches a misaligned replacement).
+- Later: re-extract only changed tomograms into the stack; `py3sta compare CYCLE --tomograms a,b`
+  (same poses, FSC + CC per set); `py3sta add-particles` for new tomograms (`py3staAddedCycle`).
 
 ## 2. Steps of one cycle
 
