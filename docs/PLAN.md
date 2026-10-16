@@ -102,10 +102,14 @@ keeps ~80 % amplitude per pass at half Nyquist, ~27 Å on MIM019).
    - **PCA** (randomized SVD, GPU): masked, band-passed stack; default *wedge-masked differences*
      (particle − wedge-applied average) so missing-wedge factors disappear; plain PCA available for i3 parity.
    - Outputs: eigenvolumes (montage + MRC), scree plot, per-particle scores (`py3staPC1..n` columns + `.npy`).
+   - (done) `msa:` mode `wmd` | `plain` (+ `wedge`: each particle filtered with its own wedge); factor
+     diagnostics (adjusted correlation with wedge orientation / tomogram / height / CC) + PNGs.
 5. **Classification** — on chosen factors (i3 `CLSFACT`), for a list of K:
    - **k-means** (GPU), **Ward hierarchical** (i3 parity, dendrogram), **GMM** (BIC suggestion), HDBSCAN later.
    - Per K: `class_K###.star`, wedge-weighted class averages, counts, montage, dendrogram.
    - Stability score (bootstrap ARI) per K to flag noise-driven classes.
+   - (done) `classify:` method, factors, k, `use` (the K passed to select), bootstrap; per-class Jaccard;
+     PNGs (scatter, class montages, stability/BIC, dendrogram). HDBSCAN not yet.
 6. **Embedding + interactive selection (UMAP)**
    - **UMAP** (umap-learn; cuML if available) and t-SNE on the top PCA scores → 2D coordinates per particle.
    - **Interactive explorer** `py3sta explore cycle-000`: scatter plot of UMAP (or any two PCs), coloured by
@@ -228,7 +232,7 @@ tunnel (`ssh -L 8050:localhost:8050 workstation`).
 | 0 ✅ | I/O, converters, extraction, wedge/dose/CTF averaging, parallel CPU, torch mirror | see PROGRESS.md |
 | 1 | Pipeline skeleton: project/cycle dirs, configs, manifests, status, references (global/file), stack, pose composition, `_final.star`, `next`; dummy classification from existing `rlnClassNumber` | average from the stack == average from the tomograms (float16 vs float32 measured); only changed/drifted particles re-cropped; synthetic class transforms recovered exactly |
 | 2 | Alignment engine (CPU + GPU), MRA step | MIM019 angles perturbed ±15° recovered (median < 5°), FSC not worse; 265 ptcl × 2000 orientations < 1 min on GPU |
-| 3 | PCA (wedge-masked differences + plain), k-means, Ward, GMM, multi-K outputs | synthetic 2-state data separated; wedge factors absent |
+| 3 ✅ | PCA (wedge-masked differences + plain), k-means, Ward, GMM, multi-K outputs | synthetic 2-state data separated; wedge factors absent |
 | 4 | UMAP + `explore` (static HTML lasso → groups.json → class_lasso.star) | groups round-trip into `select`; lasso on synthetic data reproduces true classes |
 | 5 | `select`: each/reference targets, leave/exclude (flag carried over), `flag --include/--exclude`, class-average alignment, propagate to members, full cycle | one full cycle on MIM019; next-cycle average ≥ previous (FSC, CC vs template) |
 | 6 | Dashboard (§4): v1 read-only (cycles, viewers, FSC, logs), v2 run/edit (job queue, forms, select, flags, live lasso averages); ChimeraX push | a full cycle on MIM019 run entirely from the dashboard; CLI and GUI interchangeable on the same project |

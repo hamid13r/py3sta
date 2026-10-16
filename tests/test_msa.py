@@ -32,7 +32,7 @@ class CropStack:
         return self.crops
 
 
-def two_states(n=80, seed=0, noise=0.3, wedge=True):
+def two_states(n=80, seed=0, noise=0.3, wedge=True, extra=EXTRA):
     """Chiral object (state 1) or chiral object + one blob (state 2) at random poses, wedge applied in
     the tomogram frame, Gaussian noise. Returns (stack, particles, states)."""
     rng = np.random.default_rng(seed)
@@ -52,8 +52,8 @@ def two_states(n=80, seed=0, noise=0.3, wedge=True):
     crops = []
     for M, s in zip(ps.matrices, states):
         v = chiral_object(SIZE, APIX, M=M)
-        if s == 2:
-            p, sig, a = EXTRA
+        if s == 2 and extra is not None:
+            p, sig, a = extra
             v = v + a * np.exp(-((x - M.T @ np.asarray(p)) ** 2).sum(-1) / (2 * sig ** 2))
         if wedge:
             v = np.fft.irfftn(np.fft.rfftn(v) * w, s=v.shape, axes=(0, 1, 2))

@@ -259,6 +259,42 @@ def flag(project_dir, cycle, exclude, include, dry_run):
         click.echo(f"steps now stale: {', '.join(rep.stale_steps)} (re-run with 'py3sta run {project_dir} {n}')")
 
 
+@main.command()
+@click.argument("project_dir")
+@click.argument("cycle")
+@click.option("--norm-mask", required=True, help="MRC (project box) or 'reference': each particle gets mean 0 / std 1 inside it (a homogeneous part, e.g. the membrane).")
+@click.option("--mask", default=None, help="MRC or 'reference': region whose variance is reported (default: everywhere). May be the normalisation mask.")
+@click.option("--mode", type=click.Choice(["wmd", "plain"]), default=None, help="wmd: wedge-masked differences (no wedge pattern); plain: x. Default: msa.mode of the cycle.")
+@click.option("--wedge/--no-wedge", default=None, help="plain: filter each particle with its own wedge (default: msa.wedge).")
+@click.option("--bin", "bin_", type=int, default=None, help="Binning (default: msa.bin).")
+@click.option("--lowpass", type=float, default=None, help="Å (default: msa.lowpass; 0 = none).")
+@click.option("--highpass", type=float, default=None, help="Å (default: msa.highpass; 0 = none).")
+@click.option("--star", default=None, help="Particle STAR with the poses (default: the poses MSA would use).")
+@click.option("--name", default=None, help="Output folder name under cycle-NNN/variance/ (default from the masks and mode).")
+@click.option("-o", "--out", default=None, help="Output folder (overrides --name).")
+def variance(project_dir, cycle, norm_mask, mask, mode, wedge, bin_, lowpass, highpass, star, name, out):
+    """Voxel-wise variance of CYCLE's aligned particles: where is the stack heterogeneous?"""
+    from .pipeline import ConfigError, load_project
+    from .pipeline.variance import run_variance
+    from .stack import StackError
+
+    try:
+        rep = run_variance(load_project(project_dir), _cycle_number(cycle), norm_mask, mask, mode, wedge, bin_,
+                           lowpass, highpass, star, name, out, log=click.echo)
+    except (ConfigError, StackError, FileNotFoundError, ValueError, RuntimeError) as e:
+        raise click.ClickException(str(e))
+    for w in rep.warnings:
+        click.echo(f"warning: {w}")
+    st = rep.stats
+    for key, label in (("variance_mask", "variance mask"), ("norm_mask", "normalisation mask"), ("outside", "outside both")):
+        r = st[key]
+        if r.get("voxels"):
+            ratio = f", {r['median_over_baseline']:.2f}x baseline" if "median_over_baseline" in r else ""
+            click.echo(f"{label:19s} {r['voxels']:7d} voxels: median {r['median']:.4g}, p95 {r['p95']:.4g}, "
+                       f"max {r['max']:.4g}{ratio}")
+    click.echo(f"baseline: median variance {st['baseline'].replace('_', ' ')}; results in {rep.out}")
+
+
 @main.command("next")
 @click.argument("project_dir")
 @click.argument("cycle")

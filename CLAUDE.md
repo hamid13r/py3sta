@@ -19,15 +19,21 @@ src/py3sta/
   backend_torch.py   PyTorch/CUDA mirror of extract/wedge/average (must stay numerically equal to numpy)
   poses.py           pose composition: delta (R, t) in the reference frame -> M' = R M, c' = c + M'.T t
   mra.py             particle alignment: cone/spin levels, constrained CC (wedge on both maps), best reference
+  msa.py             MSA stack at the current poses (wmd = wedge-masked differences | plain ± own wedge),
+                     randomized PCA (numpy + torch), wedge / tomogram factor diagnostics
+  variance.py        voxel-wise variance of the aligned particles (wmd / plain), normalised in a chosen mask
+  cluster.py         kmeans (numpy + torch), Ward, GMM (BIC), classes by size, ARI, bootstrap stability
+  plots.py           diagnostic PNGs of the steps (matplotlib optional); interactive views go to the dashboard
   align.py           map-to-map alignment: resample, SO(3) grid, masked CC over shifts (numpy + torch), polish, mirror
   reference.py       masks (sphere/ellipsoid/box/file, soft edges in Å), band-pass, fit_box, prepare_reference
   stack.py           project particle stack: unrotated float16 crops, refresh_stack (new / tomogram changed / drift)
-  cli.py             click CLI: init run status next flag stack align-maps pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
+  cli.py             click CLI: init run status next flag variance stack align-maps pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
   io/                star.py (dependency-free STAR), mrc.py (numpy MRC), trf.py (i3), dipole.py (.pos picks),
                      particles.py (ParticleSet = RELION-4 particle table + tomo_key naming)
-  pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks, next_cycle), flags.py (flag),
+  pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks, next_cycle), flags.py (flag), variance.py (py3sta variance),
                      manifest.py (run_step, change tracking, states), steps.py (step order, pose sources,
-                     01_average, 02_reference, 03_align, 05_classify (column), 07_select, 08_final), runner.py (run_cycle, status)
+                     01_average, 02_reference, 03_align, 04_msa, 05_classify (kmeans/ward/gmm per K, column),
+                     07_select, 08_final), runner.py (run_cycle, status)
   utils/             stand-alone utilities (each also `python -m py3sta.utils.<name>`), e.g. add_warp_xml
 tests/               pytest; scipy/torch tests auto-skip when not installed
 scripts/check_torch.py   GPU vs numpy parity + timing on real data

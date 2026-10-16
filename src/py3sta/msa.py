@@ -86,15 +86,15 @@ class _Sampler:
     """Band-passed, normalised, binned subvolumes in the reference frame and their wedges (one tomogram
     chunk at a time); numpy reference or torch."""
 
-    def __init__(self, box, apix, s: MSASettings, mask_b, device):
+    def __init__(self, box, apix, s: MSASettings, norm_b, device):
         self.b = box // s.bin
         self.bin, self.apix, self.dev = s.bin, apix, device
         self.lowpass = search_lowpass(s.lowpass, apix, s.bin)
         self.highpass = s.highpass
         self.sphere = extraction_sphere(self.b)
-        self.norm = ((mask_b > 0.5) * self.sphere).astype(np.float32)
+        self.norm = ((norm_b > 0.5) * self.sphere).astype(np.float32)
         if not self.norm.any():
-            raise ValueError("MSA mask has no voxel above 0.5 at the binned sampling")
+            raise ValueError("normalisation mask has no voxel above 0.5 at the binned sampling")
         self._filt = {}
         if device is not None:
             import torch
@@ -155,75 +155,102 @@ class _Sampler:
         return F.cpu().numpy(), (W.cpu().numpy() if W is not None else None)
 
 
-def build_stack(ps, stack, mask, apix: float, settings: MSASettings, tilts: dict | None = None,
-                invert: bool = False, device=None, chunk: int = 64, progress=None) -> MSAStack:
-    """MSA rows for every particle of ``ps`` at its current pose (see module doc).
+class ParticleVolumes:
+    """The particles of ``ps`` as MSA data volumes (b^3, reference frame), streamed in tomogram chunks:
+    wmd differences W_i (F_i - A) or plain x_i (W_i x_i with ``wedge``). For wmd, the Wiener average A is
+    computed first (one extra pass). Iterate for (row indices, (P, b, b, b) float32 volumes); after a full
+    iteration ``mean`` is the voxel-wise mean of the data volumes and ``average`` the map they are relative
+    to (wmd: A; plain: the mean)."""
 
-    mask: (box^3) at ``apix``; tilts: {rlnTomoName: TiltInfo}, needed for wmd and for plain + wedge.
-    device: torch device, or None for the numpy reference."""
-    s = settings
-    box = np.asarray(mask).shape[0]
-    if box % s.bin:
-        raise ValueError(f"box {box} is not divisible by bin {s.bin}")
-    if s.uses_wedge and tilts is None:
-        raise ValueError(f"MSA mode {s.mode}{' + wedge' if s.mode == 'plain' else ''} needs tilt information")
-    mask_b = binned_mask(mask, apix, s.bin)
-    sm = _Sampler(box, apix, s, mask_b, device)
-    b = sm.b
-    voxels = np.flatnonzero(mask_b.ravel() > 0)
-    weights = mask_b.ravel()[voxels]
-    loc = stack.locate(ps)
-    centres = particle_centres(ps, stack.apix)
-    mats = ps.matrices
-    data = stack.data()
-    tomos = ps.df["rlnTomoName"].to_numpy()
-    n = len(ps)
+    def __init__(self, ps, stack, box: int, apix: float, settings: MSASettings, norm_mask, tilts=None,
+                 invert: bool = False, device=None, chunk: int = 64, progress=None):
+        s = settings
+        if box % s.bin:
+            raise ValueError(f"box {box} is not divisible by bin {s.bin}")
+        if s.uses_wedge and tilts is None:
+            raise ValueError(f"MSA mode {s.mode}{' + wedge' if s.mode == 'plain' else ''} needs tilt information")
+        self.s, self.tilts, self.invert, self.chunk, self.progress = s, tilts, invert, chunk, progress
+        self.sampler = _Sampler(box, apix, s, binned_mask(norm_mask, apix, s.bin), device)
+        self.b = self.sampler.b
+        self.apix = apix * s.bin
+        self.ps, self.loc = ps, stack.locate(ps)
+        self.centres = particle_centres(ps, stack.apix)
+        self.mats = ps.matrices
+        self.data = stack.data()
+        self.tomos = ps.df["rlnTomoName"].to_numpy()
+        self.n = len(ps)
+        self.total = 2 * self.n if s.mode == "wmd" else self.n
+        self.done = 0
+        self.A = self._wiener_average() if s.mode == "wmd" else None
+        self.mean = None
 
-    def chunks():
-        for tomo in dict.fromkeys(tomos):
-            tilt = tilts.get(tomo) if s.uses_wedge else None
+    def _chunks(self):
+        s = self.s
+        for tomo in dict.fromkeys(self.tomos):
+            tilt = self.tilts.get(tomo) if s.uses_wedge else None
             if s.uses_wedge and tilt is None:
                 raise ValueError(f"no tilt information for {tomo}")
-            sel = np.nonzero(tomos == tomo)[0]
-            for c0 in range(0, len(sel), chunk):
-                ids = sel[c0:c0 + chunk]
-                crops = np.array(data[loc.rows[ids]], np.float32)
-                if invert:
+            sel = np.nonzero(self.tomos == tomo)[0]
+            for c0 in range(0, len(sel), self.chunk):
+                ids = sel[c0:c0 + self.chunk]
+                crops = np.array(self.data[self.loc.rows[ids]], np.float32)
+                if self.invert:
                     crops = -crops
-                yield ids, sm.sample(crops, loc.lo[ids], loc.tomo_shape[tomo], centres[ids], mats[ids], tilt)
+                F, W = self.sampler.sample(crops, self.loc.lo[ids], self.loc.tomo_shape[tomo], self.centres[ids],
+                                           self.mats[ids], tilt)
+                yield ids, F, W
+                self.done += len(ids)
+                if self.progress:
+                    self.progress(self.done, self.total)
 
-    shape = (b,) * 3
-    total = 2 * n if s.mode == "wmd" else n
-    done = 0
-    A = None
-    if s.mode == "wmd":
+    def _wiener_average(self):
+        b = self.b
         num = np.zeros((b, b, b // 2 + 1), np.complex128)
         den = np.zeros((b, b, b // 2 + 1))
-        for ids, (F, W) in chunks():
+        for _, F, W in self._chunks():
             num += (W * F).sum(0)
             den += (W * W).sum(0)
-            done += len(ids)
-            if progress:
-                progress(done, total)
-        A = (num / np.maximum(den, s.wiener_eps * n)).astype(np.complex64)
-    X = np.empty((n, len(voxels)), np.float32)
-    for ids, (F, W) in chunks():
-        if s.mode == "wmd":
-            G = W * (F - A)
-        else:
-            G = F * W if s.wedge else F
-        vol = np.fft.irfftn(G, s=shape, axes=(1, 2, 3)).reshape(len(ids), -1)
-        X[ids] = vol[:, voxels] * weights
-        done += len(ids)
-        if progress:
-            progress(done, total)
-    if s.mode == "wmd":
-        average = np.fft.irfftn(A, s=shape, axes=(0, 1, 2)).astype(np.float32)
-    else:
-        average = np.zeros(b ** 3, np.float32)
-        average[voxels] = X.mean(0) / np.maximum(weights, 1e-6)
-        average = average.reshape(shape)
-    return MSAStack(X, voxels, weights.astype(np.float32), b, apix * s.bin, average)
+        return (num / np.maximum(den, self.s.wiener_eps * self.n)).astype(np.complex64)
+
+    def __iter__(self):
+        shape = (self.b,) * 3
+        total = np.zeros(shape, np.float64)
+        for ids, F, W in self._chunks():
+            if self.s.mode == "wmd":
+                G = W * (F - self.A)
+            else:
+                G = F * W if self.s.wedge else F
+            vols = np.fft.irfftn(G, s=shape, axes=(1, 2, 3)).astype(np.float32)
+            total += vols.sum(0)
+            yield ids, vols
+        self.mean = (total / max(self.n, 1)).astype(np.float32)
+
+    @property
+    def average(self) -> np.ndarray:
+        if self.s.mode == "wmd":
+            return np.fft.irfftn(self.A, s=(self.b,) * 3, axes=(0, 1, 2)).astype(np.float32)
+        if self.mean is None:
+            raise RuntimeError("plain average: iterate over the volumes first")
+        return self.mean
+
+
+def build_stack(ps, stack, mask, apix: float, settings: MSASettings, tilts: dict | None = None,
+                invert: bool = False, device=None, chunk: int = 64, progress=None, norm_mask=None) -> MSAStack:
+    """MSA rows for every particle of ``ps`` at its current pose (see module doc).
+
+    mask: (box^3) at ``apix``, the MSA mask; norm_mask: where each particle is normalised (default: the
+    mask). tilts: {rlnTomoName: TiltInfo}, needed for wmd and for plain + wedge. device: torch device, or
+    None for the numpy reference."""
+    box = np.asarray(mask).shape[0]
+    pv = ParticleVolumes(ps, stack, box, apix, settings, mask if norm_mask is None else norm_mask, tilts, invert,
+                         device, chunk, progress)
+    mask_b = binned_mask(mask, apix, settings.bin)
+    voxels = np.flatnonzero(mask_b.ravel() > 0)
+    weights = mask_b.ravel()[voxels]
+    X = np.empty((pv.n, len(voxels)), np.float32)
+    for ids, vols in pv:
+        X[ids] = vols.reshape(len(ids), -1)[:, voxels] * weights
+    return MSAStack(X, voxels, weights.astype(np.float32), pv.b, pv.apix, pv.average)
 
 
 # -------------------------------------------------------------------- PCA
