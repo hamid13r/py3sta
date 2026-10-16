@@ -443,6 +443,7 @@ def run_msa(ctx, project, n: int, c: CycleConfig) -> None:
 # ---------------------------------------------------------------- classify
 CLASS_COLUMN = "py3staClass"
 STABLE_JACCARD = 0.6                                       # a class below this is not reproducible
+WEDGE_CLASS_R = 0.3                                        # warn: classes follow the wedge orientation
 
 
 def classify_upstream(c: CycleConfig) -> tuple:
@@ -536,6 +537,8 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
 
     from .. import cluster, plots
     from ..io.star import read_star, write_star
+    from ..msa import class_wedge_r
+    from .manifest import read_manifest
     from .project import PARTICLE_NAME, load_cycle_input
 
     cl = c.classify
@@ -561,6 +564,11 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
     if set(index.index) != set(names):
         raise ValueError(f"{msa_star.name} does not cover the active particles of {path.name} (re-run msa)")
     X = scores[cols].to_numpy(float)[index.loc[names].to_numpy()]
+    msa_info = (read_manifest(msa_star.parent) or {}).get("info", {})
+    flagged = sorted(set(cl.factors) & set(msa_info.get("wedge_factors", [])))
+    if flagged:
+        ctx.warn(f"classify.factors include factor(s) {flagged} that msa flagged as following the missing wedge: "
+                 "classes may sort particles by orientation (drop them from classify.factors)")
     if cl.standardize:
         X = X / np.where(X.std(0) > 0, X.std(0), 1)
     device, label = resolve_device(project.config.compute)
@@ -588,15 +596,20 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
                 r["py3staClassJaccard"] = round(float(st.jaccard[r[CLASS_COLUMN] - 1]), 3)
         write_star({"classes": pd.DataFrame(rows)}, ctx.output_star(f"classes_{tag}.star"))
         montage[k] = (vols, [f"{r[CLASS_COLUMN]} ({r['py3staClassCount']})" for r in rows])
-        srow = {"py3staK": k, "py3staScore": round(res.score, 4), "py3staSmallestClass": int(res.counts.min())}
+        wedge_r = class_wedge_r(res.labels, cin.particles.matrices)
+        srow = {"py3staK": k, "py3staScore": round(res.score, 4), "py3staSmallestClass": int(res.counts.min()),
+                "py3staWedgeR": round(wedge_r, 3)}
         if st is not None:
             srow.update(py3staARI=round(st.ari_mean, 3), py3staJaccardMin=round(float(np.nanmin(st.jaccard)), 3))
         if res.bic is not None:
             srow["py3staBIC"] = round(res.bic, 1)
         summary.append(srow)
         info_k[str(k)] = {"counts": res.counts.tolist(), **{key[6:].lower(): v for key, v in srow.items()
-                                                             if key in ("py3staARI", "py3staJaccardMin", "py3staBIC")}}
-        ctx.log(f"K={k}: counts {res.counts.tolist()}"
+                                                             if key in ("py3staARI", "py3staJaccardMin", "py3staBIC",
+                                                                        "py3staWedgeR")}}
+        if wedge_r > WEDGE_CLASS_R:
+            ctx.warn(f"K={k}: classes follow the missing-wedge orientation (r {wedge_r:.2f})")
+        ctx.log(f"K={k}: counts {res.counts.tolist()}, wedge r {wedge_r:.2f}"
                 + (f", ARI {st.ari_mean:.2f}, weakest class Jaccard {np.nanmin(st.jaccard):.2f}" if st is not None else "")
                 + (f", BIC {res.bic:.0f}" if res.bic is not None else ""))
     summary = pd.DataFrame(summary)

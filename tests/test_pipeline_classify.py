@@ -34,6 +34,8 @@ def test_kmeans_classes_to_select_and_final(two_state_proj):
     assert read_mrc(out / "classes_K003.mrcs")[0].shape == (3 * 40, 40, 40)
     info = read_manifest(out)["info"]
     assert info["per_k"]["2"]["ari"] == 1.0 and 2 in info["stable_k"]
+    assert info["per_k"]["2"]["wedger"] < 0.3
+    assert "py3staWedgeR" in read_star(out / "summary.star")["summary"]
     # several K and no choice: select stops and asks for classify.use
     with pytest.raises(ValueError, match="set classify.use"):
         run_cycle(load_project(proj.root), 0, start="select")
@@ -73,3 +75,12 @@ def test_classify_validation(two_state_proj):
         with pytest.raises(ConfigError, match=msg):
             load_project(two_state_proj.root).cycle_config(0)
         _edit_yaml(cy, lambda c: c.update(classify={"factors": [1, 2, 3], "k": [2, 3]}))
+
+
+def test_warns_on_wedge_factors(two_state_proj):
+    proj = two_state_proj
+    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml",
+               lambda c: (c["msa"].update(mode="plain", wedge=False), c["classify"].update(bootstrap=0, k=[2])))
+    run_cycle(proj, 0, stop="classify")
+    w = read_manifest(proj.cycle_dir(0) / "05_classify")["warnings"]
+    assert any("flagged as following the missing wedge" in x for x in w), w

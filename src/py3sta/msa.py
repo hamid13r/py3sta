@@ -398,6 +398,17 @@ def correlation_ratio(y, groups, adjusted: bool = True) -> float:
     return _adjusted(between / ss, len(y), len(g) - 1) if adjusted else float(math.sqrt(between / ss))
 
 
+def class_wedge_r(labels, mats) -> float:
+    """How much the classes follow the wedge orientation: mean over classes of the adjusted multiple
+    correlation of the class indicator with the wedge features (~0 at chance)."""
+    F = wedge_features(mats)
+    labels = np.asarray(labels)
+    ids = np.unique(labels)
+    if len(ids) < 2:
+        return 0.0
+    return float(np.mean([multiple_r((labels == c).astype(float), F) for c in ids]))
+
+
 def factor_diagnostics(scores, mats, tomos=None, extra: dict | None = None):
     """Per factor: wedge_r (adjusted multiple correlation with the wedge orientation), tomo_eta (adjusted
     correlation ratio with the tomogram), and |r| with each ``extra`` column (e.g. z height, alignment CC). DataFrame, one row per
