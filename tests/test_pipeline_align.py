@@ -102,4 +102,26 @@ def test_align_config_validation(chiral_proj):
             load_project(chiral_proj.root).cycle_config(0)
         _edit_yaml(cy, lambda c: c.update(align={"enable": False}))
     p = load_project(chiral_proj.root)
-    assert p.config.align_shift_vox(None) == 1 and p.config.align_shift_vox(3.9) == 0
+    assert p.config.align_shift_vox(None) == [1, 1, 1] and p.config.align_shift_vox(3.9) == [0, 0, 0]
+    assert p.config.align_shift_vox([4.0, 4.0, 0.0]) == [1, 1, 0]
+    for upd, msg in (({"max_shift": [4.0, 4.0]}, "one value or \\[x, y, z\\]"), ({"min_gain": -0.1}, "min_gain")):
+        _edit_yaml(cy, lambda c: c["align"].update(**{"enable": True, "wedge": False, **upd}))
+        with pytest.raises(ConfigError, match=msg):
+            load_project(chiral_proj.root).cycle_config(0)
+
+
+def test_per_axis_shift_and_min_gain(chiral_proj):
+    """z shift limit 0: no particle moves along tomogram z; a huge min_gain keeps every pose."""
+    proj, true, wrong = _setup(chiral_proj)
+    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml",
+               lambda c: c["align"].update(bin=2, lowpass=16.0, levels=LEVELS[:2], max_shift=[4.0, 4.0, 0.0]))
+    run_cycle(proj, 0, stop="align")
+    al = ParticleSet.from_star(proj.cycle_dir(0) / "03_align" / "aligned.star")
+    d = (al.centers_px - wrong.centers_px) * al.ts_apix / APIX
+    np.testing.assert_allclose(d[:, 2], 0, atol=1e-6)
+    assert np.abs(d[:, :2]).max() > 0.1
+    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["align"].update(min_gain=5.0))
+    run_cycle(load_project(proj.root), 0, start="align", stop="align")
+    al = ParticleSet.from_star(proj.cycle_dir(0) / "03_align" / "aligned.star")
+    np.testing.assert_allclose(_angles(al, wrong), 0, atol=1e-4)
+    assert read_manifest(proj.cycle_dir(0) / "03_align")["info"]["n_unchanged"] == 16

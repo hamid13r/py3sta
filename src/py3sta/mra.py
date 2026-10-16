@@ -80,12 +80,13 @@ def cone_grid(nut: float, nstep: float, spin: float, sstep: float) -> ConeGrid:
 @dataclass
 class MRASettings:
     levels: list = field(default_factory=lambda: [[12.0, 4.0, 12.0, 4.0], [3.0, 1.0, 3.0, 1.0], [1.0, 0.5, 1.0, 0.5]])
-    max_shift: int = 3                      # voxels at full sampling, per tomogram axis
+    max_shift: object = 3                   # voxels at full sampling per tomogram axis: int or (x, y, z)
     lowpass: float | None = 30.0            # Å
     highpass: float | None = None           # Å
     bin: int = 1
     wedge: bool = True
-    min_gain: float = 0.0                   # keep the current rotation unless the best beats it by this CC
+    min_gain: float = 0.0                   # keep the current pose (rotation and centre) unless the best
+                                            # pose beats the current rotation's CC by this much
 
 
 @dataclass
@@ -135,7 +136,15 @@ def prepare(refs, mask, apix: float, s: MRASettings) -> Prepared:
     out = np.stack([np.fft.irfftn(np.fft.rfftn(shrink(r)) * w, s=(b,) * 3, axes=(0, 1, 2)) for r in refs])
     m = np.clip(shrink(mask), 0, 1) * extraction_sphere(b)
     return Prepared(out.astype(np.float32), m.astype(np.float32), b, s.bin, apix,
-                    max(0, int(math.floor(s.max_shift / s.bin))), lowpass, s.highpass)
+                    max(0, int(math.floor(max(shift_limits(s.max_shift)) / s.bin))), lowpass, s.highpass)
+
+
+def shift_limits(max_shift) -> np.ndarray:
+    """Per tomogram axis (x, y, z) shift limits in voxels from an int or a 3-sequence."""
+    v = np.broadcast_to(np.asarray(max_shift, float), (3,)).copy()
+    if np.any(v < 0):
+        raise ValueError(f"max_shift must be >= 0 (got {max_shift})")
+    return v
 
 
 def filter_crop(crop, pr: Prepared) -> np.ndarray:
@@ -274,7 +283,8 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
     half a voxel of shift). The total shift is kept within ``max_shift`` voxels per tomogram axis (the
     stack crop allowance)."""
     pr = prepare(refs, mask, apix, settings)
-    loc = stack.locate(ps, shift_limit=settings.max_shift)
+    lim = shift_limits(settings.max_shift)
+    loc = stack.locate(ps, shift_limit=int(math.ceil(lim.max())))
     grids = [cone_grid(*lv) for lv in settings.levels] or [cone_grid(0, 0, 0, 0)]
     n, nref = len(ps), len(pr.refs)
     centres = particle_centres(ps, stack.apix)
@@ -283,7 +293,6 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
     scorer = _TorchScorer(pr, device, batch) if device is not None else None
     use_wedge = settings.wedge and tilts is not None
     fx_peak = Fixed(pr.box, None, None, 0.0, 0.0, pr.max_shift)
-    lim = float(settings.max_shift)
 
     best_D = np.zeros((n, nref, 3, 3))
     best_t = np.zeros((n, nref, 3))
@@ -328,7 +337,7 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
                     # total displacement, clipped per TOMOGRAM axis: the stack crop allowance is per tomogram
                     # axis (a ±lim cube in the reference frame reaches lim·√3 along a tomogram axis)
                     d = cen[p] + M[p].T @ (t_sub * pr.bin) - centres[ids[p]]
-                    hit[p] = lim > 0 and np.any(np.abs(d) >= lim - 1e-3)               # clipped at the limit
+                    hit[p] = bool(np.any((lim > 0) & (np.abs(d) >= lim - 1e-3)))      # clipped at the limit
                     new[p] = centres[ids[p]] + np.clip(d, -lim, lim)
                 return cc, new, hit
 
@@ -349,10 +358,15 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
                 cc, cen, hit = recentre(D, cen, r)          # converge the shift at the final rotation
                 if settings.min_gain > 0:                   # restraint: small gains are noise, keep the pose
                     I = np.repeat(np.eye(3)[None], P, 0)
-                    cc0, cen0, hit0 = recentre(I, centres[ids].copy(), r)
-                    cc0, cen0, hit0 = recentre(I, cen0, r)
+                    M0 = mats0[ids]
+                    if scorer:
+                        cc0 = scorer.score(cubes, np.arange(P), lo, shape, centres[ids], M0, r, tilt)[0]
+                    else:
+                        cc0 = evaluate(np.arange(P), M0, centres[ids], r)[0]
+                    # cc0: best integer shift at the current rotation; compare with the unshifted pose's CC would
+                    # need the map value at t = 0 -- the integer-shift peak is a (slightly generous) stand-in
                     keep = cc - cc0 < settings.min_gain
-                    D[keep], cen[keep], cc[keep], hit[keep] = I[keep], cen0[keep], cc0[keep], hit0[keep]
+                    D[keep], cen[keep], cc[keep], hit[keep] = I[keep], centres[ids][keep], cc0[keep], False
                     edge[ids[keep], r] = False
                 M = np.einsum("pij,pjl->pil", D, mats0[ids])
                 cc_ref[ids, r] = cc

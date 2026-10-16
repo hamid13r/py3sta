@@ -285,14 +285,15 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
         sign = None if p.wedge.sign == "auto" else float(p.wedge.sign)
         tilts = {t: TiltInfo.from_warp_xml(f, sign) for t, f in cin.tilt_files.items()}
     settings = MRASettings(levels=[list(map(float, lv)) for lv in a.levels], max_shift=p.align_shift_vox(a.max_shift),
-                           lowpass=a.lowpass, highpass=a.highpass, bin=a.bin, wedge=a.wedge)
+                           lowpass=a.lowpass, highpass=a.highpass, bin=a.bin, wedge=a.wedge, min_gain=a.min_gain)
     device, label = resolve_device(p.compute)
     if device is None:
         ctx.warn("align runs on the numpy reference implementation (slow); set compute.backend: torch")
     nrot = sum(len(cone_grid(*lv).mats) for lv in settings.levels)
     ps = cin.particles
     ctx.log(f"aligning {len(ps)} particles to {len(refs)} reference(s): {nrot} rotations per reference, "
-            f"shift <= {settings.max_shift} voxel(s), bin {a.bin}, {'constrained' if tilts else 'plain'} CC; {label}")
+            f"shift <= {settings.max_shift} voxel(s) (x, y, z), bin {a.bin}, {'constrained' if tilts else 'plain'} CC"
+            + (f", min_gain {a.min_gain}" if a.min_gain else "") + f"; {label}")
     step = max(1, len(ps) // 10)
     last = [0]
 
@@ -321,6 +322,7 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
     n_edge = int(res.at_edge.sum())
     counts = {str(k + 1): int((res.best_ref == k + 1).sum()) for k in range(len(refs))}
     ctx.info.update(enabled=True, n_aligned=len(ps), pose_source=src, n_rotations=nrot,
+                    n_unchanged=int(((res.angle < 1e-6) & (np.abs(res.t).max(1) < 1e-6)).sum()),
                     angle_median=round(float(np.median(res.angle)), 2), shift_median_A=round(float(np.median(shift_A)), 2),
                     cc_median=round(float(np.median(res.cc)), 4), n_at_edge=n_edge, best_reference_counts=counts)
     ctx.log(f"median change {np.median(res.angle):.2f}°, {np.median(shift_A):.2f} Å; median CC {np.median(res.cc):.3f}; "

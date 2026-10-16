@@ -90,11 +90,15 @@ class ProjectConfig:
         err.check(self.compute.jobs >= 0, "compute.jobs", f"must be >= 0 (got {self.compute.jobs})")
         err.raise_if_any()
 
-    def align_shift_vox(self, max_shift_A: float | None) -> int:
-        """Alignment shift limit in voxels: max_shift (Å) or 2 voxels, within the stack drift allowance
-        (margin - 2: a fresh crop may already be 0.5 voxel off-centre, see stack.max_drift)."""
+    def align_shift_vox(self, max_shift_A) -> list[int]:
+        """Alignment shift limits [x, y, z] in voxels (tomogram axes): max_shift (Å, one value or three) or
+        2 voxels, within the stack drift allowance (margin - 2: a fresh crop may already be 0.5 voxel
+        off-centre, see stack.max_drift)."""
         lim = max(0, self.stack.margin - 2)
-        return min(lim, 2 if max_shift_A is None else int(max_shift_A / self.apix + 1e-6))
+        if max_shift_A is None:
+            return [min(lim, 2)] * 3
+        v = max_shift_A if isinstance(max_shift_A, list) else [max_shift_A] * 3
+        return [min(lim, int(x / self.apix + 1e-6)) for x in v]
 
     @property
     def box_angst(self) -> float:
@@ -137,12 +141,14 @@ class AlignConfig:
     enable: bool = True                         # false: poses passed through unchanged
     levels: typing.List[typing.List[float]] = field(default_factory=lambda: [[12.0, 4.0, 12.0, 4.0], [3.0, 1.0, 3.0, 1.0],
                                                                              [1.0, 0.5, 1.0, 0.5]])
-    max_shift: typing.Optional[float] = None    # Å per tomogram axis (<= stack.margin - 2 voxels); null = 2 voxels
+    max_shift: typing.Optional[typing.Union[float, typing.List[float]]] = None  # Å: one value or [x, y, z] along the
+                                                # tomogram axes (<= stack.margin - 2 voxels); null = 2 voxels
     lowpass: typing.Optional[float] = 30.0      # Å
     highpass: typing.Optional[float] = None     # Å
     bin: int = 1
     wedge: bool = True                          # constrained CC (needs wedge.use in project.yaml)
     mask: typing.Optional[MaskConfig] = None    # null: the reference mask (02_reference/mask.mrc)
+    min_gain: float = 0.0                       # opt-in restraint: keep the pose unless the CC gain is >= this
 
 
 @dataclass
@@ -223,12 +229,15 @@ class CycleConfig:
         for key, v in (("lowpass", a.lowpass), ("highpass", a.highpass)):
             err.check(v is None or v > 0, f"align.{key}", f"must be > 0 Å or null (got {v})")
         err.check(a.bin >= 1, "align.bin", f"must be >= 1 (got {a.bin})")
-        err.check(a.max_shift is None or a.max_shift >= 0, "align.max_shift", f"must be >= 0 Å or null (got {a.max_shift})")
+        ms = [] if a.max_shift is None else (a.max_shift if isinstance(a.max_shift, list) else [a.max_shift])
+        err.check(len(ms) in (0, 1, 3) and all(v >= 0 for v in ms), "align.max_shift",
+                  f"must be one value or [x, y, z], >= 0 Å, or null (got {a.max_shift})")
+        err.check(a.min_gain >= 0, "align.min_gain", f"must be >= 0 (got {a.min_gain})")
         if a.mask is not None:
             err.choice(a.mask.shape, MASK_SHAPES, "align.mask.shape")
         if project is not None:
             lim = (project.stack.margin - 2) * project.apix
-            err.check(a.max_shift is None or a.max_shift <= lim + 1e-6, "align.max_shift",
+            err.check(all(v <= lim + 1e-6 for v in ms), "align.max_shift",
                       f"{a.max_shift} Å exceeds the stack drift allowance ({lim:g} Å = stack.margin - 2 voxels); "
                       "raise stack.margin in project.yaml (rebuilds the stack) or lower align.max_shift")
             err.check(project.box % a.bin == 0, "align.bin", f"box {project.box} is not divisible by {a.bin}")
@@ -291,7 +300,8 @@ CYCLE_HEADER = """\
 # All sizes in Å.  reference.mode: global | file | classes;  mask.shape: sphere | ellipsoid | box | file
 # mask.radius: 1 value (sphere) or 3 (ellipsoid / box half-sizes); reference.invert flips reference files only
 # align: levels [[nut, nstep, spin, sstep], ...] coarse to fine around the current pose (deg); max_shift Å per axis
-#   (<= stack.margin - 2 voxels; larger shifts re-crop more particles next cycle); mask: null = reference mask
+#   or [x, y, z] along the tomogram axes (<= stack.margin - 2 voxels; z is the noisiest: missing wedge);
+#   mask: null = reference mask; min_gain: opt-in, keep a particle's pose unless the CC improves by >= min_gain
 # classify.method: column (classes from classify.column; missing column = one class)
 # select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
 #   target: reference (02_reference, reference 1) or an MRC path; lowpass / highpass / max_shift in Å, step in deg

@@ -61,8 +61,31 @@ Done:
   - Change distribution: 913 < 1°, 2006 1–2°, 1967 2–5°, 684 5–10°, 511 > 10°.
   - Low-SNR particles move most: median change 5.21° in the lowest CC quarter vs 1.17° in the highest.
   - Acceptance "FSC not worse": met relative to a run from the true poses; not met relative to RELION.
-    Options: finer final sampling with a matching reference band, restraining large changes for low-CC
-    particles (i3 practice: small cones), or half-set references (decided against so far).
+- **Options tried (2026-10-16)**, all started from the RELION poses (bin 2, 30 Å, shift 2 voxels unless noted):
+
+| run | rotation change (median) | centre change (median) | FSC 0.5 | FSC 0.143 |
+|---|---|---|---|---|
+| RELION poses, not aligned | — | — | 24.9 Å | 16.3 Å |
+| baseline: full cones | 2.06° | 3.35 Å | 25.8 | 16.9 |
+| 1a local cones only | 2.00° | 3.11 Å | 25.4 | 16.7 |
+| 1b min_gain 0.01, local cones (whole pose kept) | 0° | 0 Å | 25.1 | 16.3 |
+| 1c min_gain 0.02, full cones (whole pose kept) | 0° | 0 Å | 25.1 | 16.3 |
+| 2 bin 1, reference + search at 20 Å, local | 2.00° | 2.97 Å | 24.6 | 16.8 |
+| 3 half-set references (half 1 → half1.mrc …) | 2.06° | 3.32 Å | 25.7 | 16.9 |
+| shifts only | 0° | 2.42 Å | 25.6 | 16.4 |
+| **rotations only, local cones** | 1.83° | 0 Å | **24.3** | 16.6 |
+| perturbed start, full cones + min_gain 0.02 | 2.05° | 2.34 Å | 25.6 | 16.8 |
+
+  - **The shifts cause the FSC loss, not the rotations**: rotation-only local refinement beats RELION at
+    FSC 0.5 (24.3 vs 24.9 Å). Shift estimates are unbiased (mean ≈ 0) but noisy and anisotropic: rms 1.9 /
+    2.7 / 3.9 Å along tomogram x / y / z (missing wedge elongates the CC peak along z); low-CC particles
+    shift most (median 5–6 Å in the lowest CC quarter). RELION refines against the tilt images (user's point),
+    which pins the centres better than subvolumes from reconstructed tomograms can.
+  - Half-set references: no effect at this resolution. Bin 1 with matched filters: small gain at 0.5 only,
+    ~9x slower. min_gain (whole pose kept) preserves good poses but does not help the perturbed set.
+  - Acted on: `align.max_shift` per tomogram axis (`[x, y, z]` Å, e.g. a small z limit; `0` = rotations
+    only) and `align.min_gain` (opt-in restraint, default 0). min_gain first kept only the rotation and still
+    re-estimated the shift — fixed to keep the whole pose.
 
 ## Phase 2 part 2 — `03_align` step (2026-10-15)
 
