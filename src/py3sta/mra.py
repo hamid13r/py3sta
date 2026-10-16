@@ -85,6 +85,7 @@ class MRASettings:
     highpass: float | None = None           # Å
     bin: int = 1
     wedge: bool = True
+    min_gain: float = 0.0                   # keep the current rotation unless the best beats it by this CC
 
 
 @dataclass
@@ -346,6 +347,13 @@ def align_particles(ps, stack, refs, mask, apix: float, settings: MRASettings, t
                         edge[ids, r] = [g.at_edge(k) for k in kbest]
                     cc, cen, hit = recentre(D, cen, r)
                 cc, cen, hit = recentre(D, cen, r)          # converge the shift at the final rotation
+                if settings.min_gain > 0:                   # restraint: small gains are noise, keep the pose
+                    I = np.repeat(np.eye(3)[None], P, 0)
+                    cc0, cen0, hit0 = recentre(I, centres[ids].copy(), r)
+                    cc0, cen0, hit0 = recentre(I, cen0, r)
+                    keep = cc - cc0 < settings.min_gain
+                    D[keep], cen[keep], cc[keep], hit[keep] = I[keep], cen0[keep], cc0[keep], hit0[keep]
+                    edge[ids[keep], r] = False
                 M = np.einsum("pij,pjl->pil", D, mats0[ids])
                 cc_ref[ids, r] = cc
                 best_t[ids, r] = np.einsum("pij,pj->pi", M, cen - centres[ids])

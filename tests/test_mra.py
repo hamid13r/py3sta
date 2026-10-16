@@ -172,3 +172,16 @@ def test_shift_limit_per_tomogram_axis(device):
     res = align_particles(given, stack, chiral_object()[None], MASK, APIX, s, device=device)
     moved = np.einsum("nji,nj->ni", np.einsum("nij,njk->nik", res.R, given.matrices), res.t)    # M'.T t
     assert np.abs(moved).max() <= 1 + 1e-6 and res.at_edge.any()
+
+
+def test_min_gain_keeps_good_poses(device):
+    """With a restraint, particles already at their true pose keep it; perturbed ones still move."""
+    stack, given, true = _scene(n=4, wedge=False, max_err=0.0, max_shift=0.0, seed=17)
+    s = MRASettings(levels=[[4.0, 2.0, 4.0, 2.0]], max_shift=2, lowpass=12.0, bin=2, min_gain=0.5)
+    res = align_particles(given, stack, chiral_object()[None], MASK, APIX, s, device=device)
+    np.testing.assert_allclose(res.angle, 0, atol=1e-6)                           # gain < 0.5: all kept
+    stack, given, true = _scene(n=4, wedge=False, max_err=6.0, seed=19)
+    s = MRASettings(levels=[[12.0, 4.0, 12.0, 4.0], [3.0, 1.0, 3.0, 1.0]], max_shift=2, lowpass=12.0, bin=2,
+                    min_gain=0.001)
+    res = align_particles(given, stack, chiral_object()[None], MASK, APIX, s, device=device)
+    assert (res.angle > 1).all()
