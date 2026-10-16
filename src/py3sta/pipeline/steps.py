@@ -443,6 +443,7 @@ def run_msa(ctx, project, n: int, c: CycleConfig) -> None:
 # ---------------------------------------------------------------- classify
 # named classification runs + comparison: pipeline/classify.py
 from .classify import CLASS_COLUMN, classification_files, classify_params, classify_upstream, run_classify  # noqa: E402
+from .embed import embed_params, embed_upstream, run_embed  # noqa: E402
 
 
 # ------------------------------------------------------------------ select
@@ -617,7 +618,7 @@ STEPS: tuple[Step, ...] = (
          poses="aligned.star"),
     Step("msa", "04_msa", _with_pose_source("msa", ("reference",)), msa_params, run_msa),
     Step("classify", "05_classify", _with_pose_source("classify", classify_upstream), classify_params, run_classify),
-    Step("embed", "06_embed", ("classify",)),
+    Step("embed", "06_embed", embed_upstream, embed_params, run_embed),
     Step("select", "07_select", _with_pose_source("select", ("classify", "reference")), select_params, run_select,
          poses="selected.star"),
     Step("final", "08_final", _with_pose_source("final"), final_params, run_final),

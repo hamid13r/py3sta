@@ -23,7 +23,8 @@ WEDGE_SIGNS = ("auto", 1, -1)
 REFERENCE_MODES = ("global", "file", "classes")
 MASK_SHAPES = ("sphere", "ellipsoid", "box", "file")
 STACK_DTYPES = ("float16", "float32")
-CLASSIFY_METHODS = ("kmeans", "ward", "gmm", "hdbscan", "column")
+CLASSIFY_METHODS = ("kmeans", "ward", "gmm", "hdbscan", "column", "groups")
+EMBED_METHODS = ("umap", "tsne", "pca")
 CLASSIFY_SPACES = ("pca", "umap")
 RUN_NAME_RE = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 MSA_MODES = ("wmd", "plain")
@@ -167,6 +168,18 @@ class MSAConfig:
 
 
 @dataclass
+class EmbedConfig:
+    enable: bool = True                         # skipped when msa is disabled
+    method: str = "umap"                        # umap | tsne | pca (two factors as they are)
+    factors: typing.List[int] = field(default_factory=lambda: list(range(1, 9)))
+    standardize: bool = False
+    n_neighbors: int = 30                       # umap
+    min_dist: float = 0.1                       # umap
+    perplexity: float = 30.0                    # tsne
+    seed: int = 0
+
+
+@dataclass
 class UmapConfig:
     n_neighbors: int = 30
     min_dist: float = 0.1
@@ -177,8 +190,10 @@ class UmapConfig:
 @dataclass
 class ClassifyRun:
     """One classification run: a method on MSA factors (in PCA or UMAP space) for a list of K."""
-    method: str = "kmeans"                      # kmeans | ward | gmm | hdbscan | column
+    method: str = "kmeans"                      # kmeans | ward | gmm | hdbscan | column | groups
     column: str = "rlnClassNumber"              # method column: an integer STAR column; a missing column = one class
+    file: typing.Optional[str] = None           # method groups: groups JSON exported by 'py3sta explore'
+                                                # (relative to the cycle folder or the project)
     factors: typing.List[int] = field(default_factory=lambda: list(range(1, 9)))  # MSA factors used (i3 CLSFACT)
     k: typing.List[int] = field(default_factory=lambda: [2, 3, 4, 6, 8])          # numbers of classes (not hdbscan)
     space: str = "pca"                          # pca: factor scores | umap: UMAP embedding of the factor scores
@@ -259,7 +274,7 @@ def _ranges(v) -> str:
 
 def run_tags(r: ClassifyRun) -> list:
     """Classification tags of a run: K002, K003, ... or 'all' (column, hdbscan: one classification)."""
-    return ["all"] if r.method in ("column", "hdbscan") else [f"K{k:03d}" for k in r.k]
+    return ["all"] if r.method in ("column", "hdbscan", "groups") else [f"K{k:03d}" for k in r.k]
 
 
 def resolve_use(use, runs: dict) -> tuple:
@@ -313,6 +328,10 @@ def auto_run_name(r: ClassifyRun) -> str:
     """e.g. kmeans_f1-8, hdbscan_umap_f1_7-8, column_rlnRandomSubset."""
     if r.method == "column":
         return f"column_{r.column}"
+    if r.method == "groups":
+        import os
+
+        return "groups_" + os.path.splitext(os.path.basename(r.file or "none"))[0]
     return f"{r.method}{'_umap' if r.space == 'umap' else ''}_f{_ranges(r.factors)}"
 
 
@@ -338,6 +357,7 @@ class CycleConfig:
     align: AlignConfig = field(default_factory=AlignConfig)
     msa: MSAConfig = field(default_factory=MSAConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
+    embed: EmbedConfig = field(default_factory=EmbedConfig)
     select: SelectConfig = field(default_factory=SelectConfig)
     schema: int = SCHEMA
 
@@ -431,7 +451,9 @@ class CycleConfig:
         for name, r in runs.items():
             key = f"classify.runs.{name}" if self.classify.runs is not None else "classify"
             err.choice(r.method, CLASSIFY_METHODS, f"{key}.method")
-            if r.method == "column":
+            if r.method == "groups":
+                err.check(bool(r.file), f"{key}.file", "method 'groups' needs the groups JSON file (py3sta explore)")
+            if r.method in ("column", "groups"):
                 continue
             err.choice(r.space, CLASSIFY_SPACES, f"{key}.space")
             err.check(ms.enable, f"{key}.method", f"{r.method!r} classifies MSA factors: set msa.enable: true "
@@ -453,6 +475,17 @@ class CycleConfig:
                 err.check(u.n_neighbors >= 2, f"{key}.umap.n_neighbors", f"must be >= 2 (got {u.n_neighbors})")
                 err.check(0 <= u.min_dist <= 1, f"{key}.umap.min_dist", f"must be in [0, 1] (got {u.min_dist})")
                 err.check(u.n_components >= 1, f"{key}.umap.n_components", f"must be >= 1 (got {u.n_components})")
+        e = self.embed
+        err.choice(e.method, EMBED_METHODS, "embed.method")
+        if e.enable and ms.enable:
+            err.check(bool(e.factors) and len(set(e.factors)) == len(e.factors)
+                      and all(1 <= f <= ms.n_factors for f in e.factors)
+                      and (e.method != "pca" or len(e.factors) >= 2), "embed.factors",
+                      f"must be distinct factor numbers in 1..msa.n_factors ({ms.n_factors}), two or more for pca "
+                      f"(got {e.factors})")
+        err.check(e.n_neighbors >= 2, "embed.n_neighbors", f"must be >= 2 (got {e.n_neighbors})")
+        err.check(0 <= e.min_dist <= 1, "embed.min_dist", f"must be in [0, 1] (got {e.min_dist})")
+        err.check(e.perplexity > 0, "embed.perplexity", f"must be > 0 (got {e.perplexity})")
         if runs and self.classify.use is not None:
             try:
                 resolve_use(self.classify.use, runs)
@@ -522,6 +555,8 @@ CYCLE_HEADER = """\
 #   (classes from classify.column); one classification per K in classify.k. These fields are the defaults of every
 #   run; classify.runs: {name: {settings}} tries several (each recomputed only when its settings change; see
 #   05_classify/compare.star). use: the classification passed to select: run/K004 | run (one classification) | K
+#   method groups: lasso groups drawn in 'py3sta explore' (file: groups/NAME.json); class 0 = not in any group
+# embed: 2D map of the MSA factors for 'py3sta explore': method umap | tsne | pca (the first two factors listed)
 # select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
 #   target: reference (02_reference, reference 1) or an MRC path; lowpass / highpass / max_shift in Å, step in deg
 """

@@ -221,3 +221,27 @@ def agreement(path, labels, matrix, title: str = "") -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
+
+
+def embedding_panels(path, xy, colours: dict, axes=("1", "2"), title: str = "") -> None:
+    """One panel per colouring: {label: ("cat" | "num", values)}."""
+    plt = _plt()
+    fig, axs = plt.subplots(1, len(colours), figsize=(3.6 * len(colours), 3.4), squeeze=False)
+    for ax, (label, (kind, v)) in zip(axs[0], colours.items()):
+        v = np.asarray(v)
+        if kind == "cat":
+            cats, idx = np.unique(v.astype(str), return_inverse=True)
+            ax.scatter(xy[:, 0], xy[:, 1], c=idx % 20, cmap="tab20", vmin=0, vmax=19, s=3)
+            ax.set_title(f"{label} ({len(cats)})", fontsize=9)
+        else:
+            sc = ax.scatter(xy[:, 0], xy[:, 1], c=v, cmap="viridis", s=3)
+            fig.colorbar(sc, ax=ax, fraction=0.046)
+            ax.set_title(label, fontsize=9)
+        ax.set_xlabel(axes[0], fontsize=8)
+        ax.set_ylabel(axes[1], fontsize=8)
+        ax.tick_params(labelsize=7)
+    if title:
+        fig.suptitle(title, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)

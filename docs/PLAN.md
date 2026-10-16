@@ -117,6 +117,9 @@ keeps ~80 % amplitude per pass at half Nyquist, ~27 Å on MIM019).
      groups are saved to `06_embed/groups.json` and become a "classification" like any K
      (`class_lasso.star`), usable in `select`.
    - v1: self-contained HTML (plotly.js lasso, data embedded, no server) → "Export groups" writes JSON.
+   - (done) `06_embed` (umap | tsne | pca of `embed.factors`, upstream msa only); `py3sta explore` inlines
+     plotly.js (offline page); exported groups → `cycle-NNN/groups/NAME.json` → classify run
+     `{method: groups, file: groups/NAME.json}` (class 0 = in no group) → compare / `use` like any run.
    - v2: local server (FastAPI/Dash) that computes the class average of a drawn group live (GPU) and can
      push it to ChimeraX (REST `remotecontrol`), plus eigenvolume slider views.
    - Placeholder (done): `classify.method: column` — classes from an integer STAR column, class averages.
@@ -233,7 +236,7 @@ tunnel (`ssh -L 8050:localhost:8050 workstation`).
 | 1 | Pipeline skeleton: project/cycle dirs, configs, manifests, status, references (global/file), stack, pose composition, `_final.star`, `next`; dummy classification from existing `rlnClassNumber` | average from the stack == average from the tomograms (float16 vs float32 measured); only changed/drifted particles re-cropped; synthetic class transforms recovered exactly |
 | 2 | Alignment engine (CPU + GPU), MRA step | MIM019 angles perturbed ±15° recovered (median < 5°), FSC not worse; 265 ptcl × 2000 orientations < 1 min on GPU |
 | 3 ✅ | PCA (wedge-masked differences + plain), k-means, Ward, GMM, multi-K outputs | synthetic 2-state data separated; wedge factors absent |
-| 4 | UMAP + `explore` (static HTML lasso → groups.json → class_lasso.star) | groups round-trip into `select`; lasso on synthetic data reproduces true classes |
+| 4 ✅ | UMAP + `explore` (static HTML lasso → groups.json → class_lasso.star) | groups round-trip into `select`; lasso on synthetic data reproduces true classes |
 | 5 | `select`: each/reference targets, leave/exclude (flag carried over), `flag --include/--exclude`, class-average alignment, propagate to members, full cycle | one full cycle on MIM019; next-cycle average ≥ previous (FSC, CC vs template) |
 | 6 | Dashboard (§4): v1 read-only (cycles, viewers, FSC, logs), v2 run/edit (job queue, forms, select, flags, live lasso averages); ChimeraX push | a full cycle on MIM019 run entirely from the dashboard; CLI and GUI interchangeable on the same project |
 | 7 | CTF in alignment/MSA scores, multi-tomogram datasets (height sign), novaCTF comparison | — |

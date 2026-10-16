@@ -25,7 +25,11 @@ Done:
 
 **Phase 3 — MSA + classification** ✅ (2026-10-16, see below): `04_msa` (wmd / plain ± own wedge, randomized PCA,
 wedge diagnostics, PNGs), `05_classify` (kmeans / ward / gmm, list of K, stability, `classify.use`), and the
-on-demand `py3sta variance`. Next: Phase 4 (UMAP + `explore` lasso), or an automatic exclusion of wedge factors (open).
+on-demand `py3sta variance`.
+
+**Phase 4 — embedding + lasso selection** ✅ (2026-10-16, see below): `06_embed`, `py3sta explore` (offline HTML,
+lasso groups), groups as a classify run. Next: Phase 5 (select: targets `each`, class-average alignment among
+classes, full MIM019 cycle). Parked by the user: automatic exclusion / whitening of wedge factors.
 
 **Phase 2 — particle alignment (MRA)**, in three parts:
 1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
@@ -81,6 +85,28 @@ exactly (ARI 1.0) and go through select → final.
   and warns when `classify.factors` include factors msa flagged.
 - gmm BIC decreases monotonically up to K = 8 (no minimum): continuous variability, BIC not a K selector here.
 - Timing of classify (6081 × 8): kmeans 2.7 s (GPU, 5 K + 10 bootstraps each), ward 24 s, gmm 24 s.
+
+## Phase 4 — `06_embed` + `py3sta explore` (lasso groups) (2026-10-16)
+
+- `06_embed` (`embed:` umap | tsne | pca on `embed.factors`, default 1–8; upstream msa only, skipped when msa is
+  disabled): `embedding.star` (`py3staEmbed1/2`), `embedding.png` (tomogram, PC, alignment CC).
+- `py3sta explore PROJECT CYCLE` → `06_embed/explore.html`: self-contained (plotly.js inlined from the `plotly`
+  package — user's choice: offline over CDN; 6.5 MB for MIM019, built in 0.6 s). Axes: the 06_embed map, any two
+  PCs, every classify run's UMAP; colours: every classification, tomogram, half set, PCs, alignment CC,
+  |beam x/y/z| in the reference frame (wedge), height. Lasso/box → named groups (last selection wins, moves
+  reported), rename, delete, undo, per-group main tomograms; export / reload a groups file.
+- Groups enter as a classify run (user's choice) `{method: groups, file: groups/NAME.json}`: group k = class k,
+  class 0 = in no group, class names in `classes_all.star`; cached by the file's sha1 (the file is also a tracked
+  input: editing it makes classify stale).
+- Tests: embed modes (two-state map: k-means on the 2D map = true states for umap, tsne and pca); the page's data
+  round-trips; `tests/explore_harness.js` runs the page script in node on a stub DOM (two overlapping lassos,
+  undo, export) and the exported file loads back; acceptance: a polygon around one cluster of the map → groups
+  file → classify → select (exclude class 0) → final reproduces the true states. Headless Firefox (snap) could
+  not render the page here: the plot itself is not checked in a browser yet.
+- MIM019 (6081 particles): UMAP of factors 1–8 in 28 s; two map clusters (3437 / 2644). A polygon around cluster 1
+  (its hull) picks 3417 particles, none of cluster 2; as a classification it agrees with every K=2 classification
+  (ARI 0.88–0.90; halves 0.00), group class 15.1 Å. Re-running classify with nothing changed: 8 runs cached, 2 s.
+  (Adding fields to `ClassifyRun` changes run keys → one full recompute; irrelevant fields are dropped from the key.)
 
 ## Classification runs: named runs, UMAP / HDBSCAN, comparison (2026-10-16)
 

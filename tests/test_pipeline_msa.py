@@ -63,7 +63,8 @@ def two_state_proj(tmp_path):
                           c["select"].update(step=30.0, bin=1, lowpass=10.0, max_shift=24.0),
                           c["align"].update(enable=False),
                           c["msa"].update(bin=2, lowpass=16.0, n_factors=6),
-                          c["classify"].update(factors=[1, 2, 3], k=[2, 3], bootstrap=4, n_init=4)))
+                          c["classify"].update(factors=[1, 2, 3], k=[2, 3], bootstrap=4, n_init=4),
+                          c["embed"].update(factors=[1, 2, 3])))
     return load_project(p.root)
 
 

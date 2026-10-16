@@ -246,8 +246,8 @@ def test_status_and_cli(proj):
     assert st.drift_warning == 0 and st.cycles[0].n_particles == 40
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "reference", "--to", "reference"])
     assert r.exit_code == 0 and "1 reference(s)" in r.output, r.output
-    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "embed", "--to", "embed"])
-    assert r.exit_code != 0 and "no implemented step" in r.output
+    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "align", "--to", "embed"])
+    assert r.exit_code == 0 and "embed skipped (msa disabled)" in r.output, r.output
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "final"])
     assert r.exit_code != 0 and "upstream step select is stale" in r.output and "upstream reference re-run" in r.output
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "align"])

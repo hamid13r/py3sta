@@ -33,6 +33,7 @@ CLASS_COLUMN = "py3staClass"
 STABLE_JACCARD = 0.6                                       # a class below this is not reproducible
 WEDGE_CLASS_R = 0.3                                        # warn: classes follow the wedge orientation
 RUN_FILE = "run.json"
+NO_MSA = ("column", "groups")                              # methods that do not read MSA factors
 
 
 # ------------------------------------------------------------------ params
@@ -41,7 +42,10 @@ def run_params(r: ClassifyRun) -> dict:
     d = dataclasses.asdict(r)
     if r.method == "column":
         return {"method": "column", "column": r.column, "averages": r.averages}
+    if r.method == "groups":
+        return {"method": "groups", "file": r.file, "averages": r.averages}
     d.pop("column")
+    d.pop("file")
     if r.method == "hdbscan":
         d.pop("k")
         d.pop("n_init")
@@ -55,7 +59,7 @@ def run_params(r: ClassifyRun) -> dict:
 
 def classify_upstream(c: CycleConfig) -> tuple:
     runs = c.classify.resolved_runs()
-    return () if all(r.method == "column" for r in runs.values()) else ("msa",)
+    return () if all(r.method in NO_MSA for r in runs.values()) else ("msa",)
 
 
 def classify_params(p: ProjectConfig, c: CycleConfig) -> dict:
@@ -74,6 +78,17 @@ def classification_files(c: CycleConfig) -> tuple[str, str, str]:
 
 
 # ----------------------------------------------------------------- helpers
+def groups_file(project, n: int, name: str):
+    """A groups JSON: absolute, or relative to the cycle folder, the project, or the working directory."""
+    from pathlib import Path
+
+    for c in (Path(name), project.cycle_dir(n) / name, project.root / name):
+        if c.is_file():
+            return c
+    raise FileNotFoundError(f"{name}: groups file not found (relative to {project.cycle_dir(n)}, {project.root} or "
+                            f"{Path.cwd()}); export it from 'py3sta explore'")
+
+
 def _class_averages(project, cin, cls, ids, average, path):
     """Class averages written to ``path`` (or None: counts only) and per-class rows."""
     from ..average import fsc, resolution_at
@@ -154,10 +169,22 @@ def _compute_run(ctx, project, n: int, name: str, r: ClassifyRun, rdir, cin, pat
     mats = cin.particles.matrices
     Z = None
     view, view_axes = None, None
+    class_names = {}
     if r.method == "column":
         lab = _column_labels(ctx, cin, r.column, path)
         results = {"all": (cluster.ClusterResult(lab, int(len(np.unique(lab))), "column", 0.0), None)}
         ctx.log(f"run {name}: classes from column {r.column}")
+    elif r.method == "groups":
+        from .explore import load_groups
+
+        gfile = groups_file(project, n, r.file)
+        lab, gnames = load_groups(gfile, names)
+        class_names = {i + 1: g for i, g in enumerate(gnames)}
+        class_names[0] = "(not in a group)"
+        results = {"all": (cluster.ClusterResult(lab, len(gnames), "groups", 0.0), None)}
+        ctx.log(f"run {name}: {len(gnames)} group(s) from {gfile.name}: "
+                + ", ".join(f"{g} ({int((lab == i + 1).sum())})" for i, g in enumerate(gnames))
+                + f"; not in a group: {int((lab == 0).sum())}")
     else:
         X = scores[[f"py3staPC{f}" for f in r.factors]].to_numpy(float)
         if r.standardize:
@@ -199,6 +226,9 @@ def _compute_run(ctx, project, n: int, name: str, r: ClassifyRun, rdir, cin, pat
         ids = np.unique(res.labels)
         rows, vols = _class_averages(project, cin, res.labels, ids, average,
                                      rdir / f"classes_{tag}.mrcs" if r.averages else None)
+        if class_names:
+            for row in rows:
+                row["py3staClassName"] = class_names.get(row[CLASS_COLUMN], "")
         if st is not None:
             for row in rows:
                 c = row[CLASS_COLUMN]
@@ -222,7 +252,8 @@ def _compute_run(ctx, project, n: int, name: str, r: ClassifyRun, rdir, cin, pat
         if wedge_r > WEDGE_CLASS_R:
             ctx.warn(f"run {name} {tag}: classes follow the missing-wedge orientation (r {wedge_r:.2f})")
         ctx.log(f"  {tag}: counts {[row['py3staClassCount'] for row in rows]}"
-                + (f" (noise {srow['py3staNoise']})" if srow["py3staNoise"] else "")
+                + (f" ({'not in a group' if r.method == 'groups' else 'noise'} = class 0: {srow['py3staNoise']})"
+                   if srow["py3staNoise"] else "")
                 + (f", ARI {st.ari_mean:.2f}, weakest Jaccard {np.nanmin(st.jaccard):.2f}" if st is not None else "")
                 + f", wedge r {wedge_r:.2f}, tomo V {srow['py3staTomoV']:.2f}"
                 + (f", best class {srow['py3staBestRes']:.1f} Å" if res_vals else "")
@@ -236,7 +267,7 @@ def _compute_run(ctx, project, n: int, name: str, r: ClassifyRun, rdir, cin, pat
                                 view_axes, f"classes: {title}")
         for tag, (vols, labels) in montage.items():
             plots.volume_views(rdir / f"classes_{tag}.png", vols, labels, title=f"class averages (projections), {tag}: {title}")
-        if r.method != "column" and (r.bootstrap or r.method == "gmm"):
+        if r.method not in NO_MSA and (r.bootstrap or r.method == "gmm"):
             plots.stability_summary(rdir / "summary.png", sm, f"per K: {title}")
         if Z is not None:
             plots.dendrogram(rdir / "dendrogram.png", Z, r.k, f"Ward tree: {title}")
@@ -261,7 +292,7 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
     names = cin.particles.df[PARTICLE_NAME].astype(str).to_numpy()
     upstream = {"poses": fingerprint(path)["sha1"], "average": average_params(p, c)}
     scores, flagged = None, set()
-    if any(r.method != "column" for r in runs.values()):
+    if any(r.method not in NO_MSA for r in runs.values()):
         msa_star = project.cycle_dir(n) / get_step("msa").folder / "msa.star"
         if not msa_star.is_file():
             raise FileNotFoundError(f"{msa_star}: run the msa step first (msa.enable: true)")
@@ -275,7 +306,7 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
             raise ValueError(f"{msa_star.name} does not cover the active particles of {path.name} (re-run msa)")
         scores = sc.iloc[index.loc[names].to_numpy()].reset_index(drop=True)
         for name, r in runs.items():
-            if r.method == "column":
+            if r.method in NO_MSA:
                 continue
             missing = [f for f in r.factors if f"py3staPC{f}" not in scores]
             if missing:
@@ -290,7 +321,12 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
     done, cached = {}, []
     for name, r in runs.items():
         rdir = folder / name
-        key = _key(r, upstream)
+        up = upstream
+        if r.method == "groups":
+            gfile = groups_file(project, n, r.file)
+            ctx.use_files([gfile], "groups")
+            up = {**upstream, "groups": hashlib.sha1(gfile.read_bytes()).hexdigest()}
+        key = _key(r, up)
         rec = _cached(rdir, key)
         if rec is not None:
             ctx.log(f"run {name}: unchanged (cached)")
@@ -313,8 +349,8 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
         r = runs[name]
         for s in rec["summary"]:
             rows.append({"py3staRun": name, "py3staMethod": r.method,
-                         "py3staSpace": "column" if r.method == "column" else r.space,
-                         "py3staFactors": "" if r.method == "column" else ",".join(map(str, r.factors)), **s})
+                         "py3staSpace": r.method if r.method in NO_MSA else r.space,
+                         "py3staFactors": "" if r.method in NO_MSA else ",".join(map(str, r.factors)), **s})
             cs = _particle_block(read_star(folder / name / f"class_{s['py3staTag']}.star"))
             lab = cs.set_index(cs[PARTICLE_NAME].astype(str))[CLASS_COLUMN]
             labels[f"{name}/{s['py3staTag']}"] = lab.loc[names].to_numpy()

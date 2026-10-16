@@ -295,6 +295,27 @@ def variance(project_dir, cycle, norm_mask, mask, mode, wedge, bin_, lowpass, hi
     click.echo(f"baseline: median variance {st['baseline'].replace('_', ' ')}; results in {rep.out}")
 
 
+@main.command()
+@click.argument("project_dir")
+@click.argument("cycle")
+@click.option("-o", "--out", default=None, help="HTML file (default: cycle-NNN/06_embed/explore.html).")
+@click.option("--plotly-js", default=None, help="plotly.min.js to embed (default: from the installed plotly package).")
+@click.option("--pcs", type=int, default=8, show_default=True, help="MSA factors offered as axes and colours.")
+def explore(project_dir, cycle, out, plotly_js, pcs):
+    """Build the interactive page of CYCLE's particles (2D maps, classes, lasso groups); open it in a browser."""
+    from .pipeline import ConfigError, load_project
+    from .pipeline.explore import build_explore
+
+    try:
+        rep = build_explore(load_project(project_dir), _cycle_number(cycle), out, plotly_js, pcs)
+    except (ConfigError, FileNotFoundError, ValueError) as e:
+        raise click.ClickException(str(e))
+    click.echo(f"{rep.path} ({rep.size_mb:.1f} MB, {rep.n_particles} particles; axes: {', '.join(rep.axes)}; "
+               f"{rep.colourings} colourings)")
+    click.echo(f"exported groups go to {rep.groups_dir}/, then add a classify run "
+               "{method: groups, file: groups/NAME.json}")
+
+
 @main.command("next")
 @click.argument("project_dir")
 @click.argument("cycle")
