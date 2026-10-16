@@ -88,7 +88,10 @@ def _class_averages(project, cin, cls, ids, average, path):
         row = {CLASS_COLUMN: int(cid), "py3staClassIndex": k + 1, "py3staClassCount": int(sel.sum()),
                "py3staClassFraction": round(float(sel.mean()), 4), "py3staClassRes": np.nan}
         if out is not None:
-            members = dataclasses.replace(cin.particles, df=df[sel].reset_index(drop=True))
+            mdf = df[sel].reset_index(drop=True)
+            if "rlnRandomSubset" in mdf and mdf["rlnRandomSubset"].nunique() < 2:
+                mdf = mdf.drop(columns="rlnRandomSubset")     # one half set only: FSC halves = alternate rows
+            members = dataclasses.replace(cin.particles, df=mdf)
             res = average(members)
             out[k] = res.average
             vols.append(res.average)

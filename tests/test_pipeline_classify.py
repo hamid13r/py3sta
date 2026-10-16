@@ -55,6 +55,8 @@ def test_runs_compare_and_select(two_state_proj):
     assert (comp["py3staRun"] + "/" + comp["py3staTag"]).tolist() == ["km/K002", "km/K003", "umap_km/K002",
                                                                        "hdb/all", "truth/all"]
     assert comp.set_index("py3staTag").loc["K002", "py3staWedgeR"].max() < 0.3
+    # classes made of one half set (truth = rlnRandomSubset): FSC from alternate rows, not an empty half
+    assert comp.set_index("py3staRun").loc["truth", "py3staBestRes"] < 100
     agree = pd.read_csv(out / "agreement.csv", index_col=0)
     assert agree.loc["km/K002", "truth/all"] == 1.0 and agree.loc["hdb/all", "umap_km/K002"] == 1.0
     info = read_manifest(out)["info"]

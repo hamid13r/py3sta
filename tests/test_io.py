@@ -190,3 +190,14 @@ def test_mrc_axis_order(tmp_path):
         out, apix = read_mrc(p, mmap=mmap)
         np.testing.assert_array_equal(out, vol)
         assert apix == 2.0
+
+
+def test_star_nan_roundtrip(tmp_path):
+    import numpy as np
+    import pandas as pd
+
+    from py3sta.io.star import read_star, write_star
+
+    write_star({"t": pd.DataFrame({"a": [1.5, np.nan], "b": ["x", "y"]})}, tmp_path / "n.star")
+    df = read_star(tmp_path / "n.star")["t"]
+    assert df["a"].dtype == float and np.isnan(df["a"][1]) and df["b"].tolist() == ["x", "y"]

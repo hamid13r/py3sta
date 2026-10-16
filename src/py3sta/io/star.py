@@ -8,12 +8,18 @@ import numpy as np
 import pandas as pd
 
 
+_NAN = {"nan": np.nan, "NaN": np.nan, "-nan": np.nan, "NAN": np.nan}
+
+
 def _to_numeric(df: pd.DataFrame) -> pd.DataFrame:
     for c in df.columns:
         try:
             df[c] = pd.to_numeric(df[c])
         except (ValueError, TypeError):
-            pass
+            try:                                       # pandas does not parse "nan" (written for missing values)
+                df[c] = pd.to_numeric(df[c].replace(_NAN))
+            except (ValueError, TypeError):
+                pass
     return df
 
 

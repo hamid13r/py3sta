@@ -82,6 +82,37 @@ exactly (ARI 1.0) and go through select → final.
 - gmm BIC decreases monotonically up to K = 8 (no minimum): continuous variability, BIC not a K selector here.
 - Timing of classify (6081 × 8): kmeans 2.7 s (GPU, 5 K + 10 bootstraps each), ward 24 s, gmm 24 s.
 
+## Classification runs: named runs, UMAP / HDBSCAN, comparison (2026-10-16)
+
+`classify:` flat settings = the defaults; `classify.runs` = {name: {settings}} (or a list; no name → automatic,
+e.g. `kmeans_umap_f1_7-8`); `classify.use` = `run/K004` | `run` | K. Each run in `05_classify/<run>/` with a
+`run.json` key (run settings + msa run id + pose STAR sha1 + averaging settings): only new or changed runs are
+recomputed (delete a run folder to force). `compare.star/.png` (stability, class/wedge r, class/tomogram V, best
+class FSC 0.143, BIC, noise) and `agreement.csv/.png` (ARI between all classifications). `space: umap`
+(umap-learn, seeded) clusters a UMAP embedding of the factors; `method: hdbscan` (scikit-learn) finds K and a
+noise class 0. Bootstrap on UMAP runs re-clusters subsets of the fixed embedding.
+
+MIM019 (`data/mim019_msa_check`, RELION poses, wmd factors, 10 bootstraps; 6 runs / 17 classifications with
+class averages: 155 s; adding a 7th run: 57 s, 5 runs cached):
+
+| run (factors) | K=2 | K=3 | K=4 | K=6 |
+|---|---|---|---|---|
+| km_all (1–8) | J 1.00, w 0.07, 15.0 Å | J 0.60, **w 0.35**, 18.7 | J 0.56, **w 0.42**, 19.1 | J 0.42, **w 0.45**, 21.3 |
+| km_clean (1,7,8) | 1.00, 0.07, 15.0 | 0.98, 0.05, 16.3 | 0.74, 0.05, 16.4 | 0.88, 0.05, 18.7 |
+| gmm_clean (1,7,8) | 1.00, 0.07, 15.1 | 0.92, 0.05, 16.3 | 0.87, 0.04, 16.5 | — |
+| umap_km (1,7,8) | 1.00, 0.08, 15.0 | 0.99, 0.05, 16.3 | 0.99, 0.05, 16.4 | 0.91, 0.04, 18.7 |
+| umap_km_all (1–8) | 1.00, 0.07, 15.1 | 0.92, 0.07, **15.0** | 0.93, 0.28, 16.9 | — |
+
+(J = weakest class Jaccard, w = class/wedge r, Å = best class FSC 0.143.) HDBSCAN on UMAP (1,7,8,
+min_cluster_size 100): 2 classes + 79 noise, J 0.99, 15.1 Å, ARI 0.88–0.96 with every K=2 classification.
+Control `halves` (column rlnRandomSubset): ARI 0.00 with everything, each half 17.8 Å. All K=2 classifications
+agree (ARI 0.88–1.00): the good / bad split is method-independent. UMAP on all 8 factors is far less wedge-driven
+than k-means on them (K=3 w 0.07 vs 0.35) and gives the best K=3 class (15.0 Å, 3439 particles).
+
+Fixes found on the way: a class made of one half set (column rlnRandomSubset) had an empty FSC half (reported
+the box size, 478.8 Å) → such classes use alternate rows; the STAR reader did not parse `nan` (pandas
+`to_numeric` refuses it) → columns with missing values came back as text.
+
 ## `py3sta variance` (2026-10-16)
 
 On-demand voxel-wise variance of a cycle's aligned particles (not a pipeline step; user's decision: no automatic
@@ -409,8 +440,11 @@ Files: `data/align_test/` (B/compare_emdb.png shows the fit). EMDB map: `data/em
 
 ## Decisions
 
-- (2026-10-16) `classify.use` (in `classify:`) picks the K passed to select; it is select's parameter (changing
-  it does not re-run classify). Default method kmeans, factors 1–8, K = [2, 3, 4, 6, 8], 20 bootstraps.
+- (2026-10-16) `classify.use` (in `classify:`) picks the classification passed to select (`run/K004`, `run`, or K);
+  it is select's parameter (changing it does not re-run classify). Default method kmeans, factors 1–8,
+  K = [2, 3, 4, 6, 8], 20 bootstraps.
+- (2026-10-16) Several named classification runs per cycle (user-named; automatic names when missing), class
+  averages for every run × K by default (`averages: false` per run), UMAP space and HDBSCAN in classify.
 - (2026-10-16) Diagnostic PNGs now (matplotlib optional); interactive views go to the dashboard.
 - (2026-10-16) Plain MSA "with the wedge filter" = each particle filtered with its own wedge, the mean is not.
 - (2026-10-16) `py3sta variance` is a CLI command on demand and does not make masks.
