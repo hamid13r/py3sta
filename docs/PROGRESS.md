@@ -26,8 +26,8 @@ Done:
 **Phase 2 — particle alignment (MRA)**, in three parts:
 1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
 2. ✅ `03_align` step (2026-10-15, see below).
-3. MIM019 checks (2026-10-15, see below): timing ✅ (44 s), recovery ✅ (median 2.07°), FSC "not worse" ✗
-   (0.5–0.7 Å short of the RELION poses) — open, see "Phase 2 part 3".
+3. MIM019 checks (2026-10-15, see below): timing ✅ (44 s), recovery ✅ (median 2.07°, same as a control run
+   from the true poses: 2.06°); FSC equal to the control, 0.6–0.9 Å short of RELION's poses — see "Phase 2 part 3".
 
 ## Phase 2 part 3 — MIM019 alignment checks (2026-10-15, RTX A5000)
 
@@ -52,8 +52,17 @@ Done:
 - The bin-1 pass did not help (FSC 0.143 got worse: refining against a single full-map reference at 20 Å
   probably fits noise; references are not half-set, by decision). A second pass with shifts needs re-cropped
   particles (1486 had used their crop allowance) — the pipeline does that between cycles.
-- Open: is ~2° the precision floor of this data at 30 Å, or a method limit? Control to run: align the
-  *unperturbed* RELION poses with the same settings and measure how far they move and the FSC.
+- **Control** (same settings, starting from the *unperturbed* RELION poses): the poses move by the same
+  amount — median 2.06°, 90 % 8.5°, centre 3.35 Å — and the FSC is the same (25.8 / 16.9 Å; CC with the
+  original average 0.9977). So the perturbed run converged to the same state as a run started from the
+  truth: ~2° is the precision of this search (bin 2, 30 Å, one full-map reference) on this data, not a
+  recovery failure. The FSC loss vs RELION (0.6–0.9 Å) is what one pass at these settings costs relative to
+  RELION's high-resolution refinement.
+  - Change distribution: 913 < 1°, 2006 1–2°, 1967 2–5°, 684 5–10°, 511 > 10°.
+  - Low-SNR particles move most: median change 5.21° in the lowest CC quarter vs 1.17° in the highest.
+  - Acceptance "FSC not worse": met relative to a run from the true poses; not met relative to RELION.
+    Options: finer final sampling with a matching reference band, restraining large changes for low-CC
+    particles (i3 practice: small cones), or half-set references (decided against so far).
 
 ## Phase 2 part 2 — `03_align` step (2026-10-15)
 
