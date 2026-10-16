@@ -23,11 +23,75 @@ Done:
 6. ✅ `py3sta flag` (2026-10-15, see below). Task 7 (`set-tomograms` helper) dropped by the user: tomogram
    paths live in the STAR file and are edited there.
 
+**Phase 3 — MSA + classification** ✅ (2026-10-16, see below): `04_msa` (wmd / plain ± own wedge, randomized PCA,
+wedge diagnostics, PNGs), `05_classify` (kmeans / ward / gmm, list of K, stability, `classify.use`), and the
+on-demand `py3sta variance`. Next: Phase 4 (UMAP + `explore` lasso), or an automatic exclusion of wedge factors (open).
+
 **Phase 2 — particle alignment (MRA)**, in three parts:
 1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
 2. ✅ `03_align` step (2026-10-15, see below).
 3. MIM019 checks (2026-10-15, see below): timing ✅ (44 s), recovery ✅ (median 2.07°, same as a control run
    from the true poses: 2.06°); FSC equal to the control, 0.6–0.9 Å short of RELION's poses — see "Phase 2 part 3".
+
+## Phase 3 — MSA + classification (2026-10-16, RTX A5000)
+
+Steps (one commit each): `msa.py` engine → `04_msa` step → `cluster.py` → multi-K `05_classify` → MIM019 checks.
+
+- **MSA stack** (`msa.ParticleVolumes`): each particle sampled once at its current pose from the unrotated crop
+  (every `bin`-th voxel of the band-passed crop, as in MRA), normalised inside the normalisation mask.
+  Modes: `wmd` = W_i (F_i − A), A = Wiener average of the MSA stack itself (default); `plain` = x_i
+  (`wedge: true` = W_i x_i, the user's choice for "plain with the wedge filter": own wedge on the particle, plain mean).
+- **PCA**: randomized SVD (4 power iterations, oversampling 10), rows streamed in chunks; numpy and torch agree
+  (same Ω); sign convention = largest |component| positive.
+- **Factor diagnostics** (`factors.star`, `factors.png`): adjusted multiple correlation of each factor with the
+  wedge orientation (second moments of the tilt axis and beam direction in the reference frame, 12 features),
+  adjusted correlation ratio with the tomogram, |r| with height and `py3staRefCC`. *Adjusted* matters: with 30
+  particles the raw multiple R of 12 random features is ~0.64.
+- **Classifiers**: kmeans (k-means++, numpy + torch), Ward (scipy, ≤ 30k particles), GMM (full covariance, EM from
+  kmeans, BIC); classes numbered by size; stability = ARI on 80 % subsets + per-class best Jaccard (Hennig).
+- **Outputs**: `04_msa/` msa.star (`py3staPC1..n`), scores.npy, pca.npz, eigenvolumes.mrcs (binned), scree.star,
+  factors.star, PNGs (scree, eigenvolume projections, factor bars). `05_classify/` per K: `class_<method>_K###.star`,
+  `classes_K###.mrcs/.star` (counts, FSC 0.143, Jaccard), `summary.star` (ARI, weakest Jaccard, BIC,
+  `py3staWedgeR`), PNGs (scatter, class montages, stability, dendrogram). `classify.use` picks the K for select.
+
+Synthetic (80 particles, ±50° wedge, two states = object ± one blob): wmd PC1 separates the states (accuracy 1.0,
+3 seeds), wedge r at chance (adjusted 0.0); plain and plain + wedge: factors 1–5 are wedge factors (r ≈ 0.98) and
+none separates the states. Pipeline (32 particles, 4 tomograms): kmeans / ward / gmm K=2 recover the states
+exactly (ARI 1.0) and go through select → final.
+
+**MIM019** (6081 particles, RELION poses, `data/mim019_msa_check`, bin 2 = box 36, 30 Å, reference mask,
+18 415 voxels; average..classify through the pipeline in 69 s):
+
+| mode | stack + PCA | var % PC1–6 | wedge r PC1–8 | tomo eta PC1 |
+|---|---|---|---|---|
+| wmd | 21 s + 0.3 s | 1.25, 0.41, 0.39, 0.38, 0.37, 0.34 | 0.08, **0.53–0.55 (PC2–6)**, 0.01, 0.06 | 0.43 |
+| plain | 12 s + 0.3 s | 1.31, 1.25, 1.22, 1.14, 1.10, 0.98 | 0.90, 0.72, 0.91, 0.89, 0.59, 0.89, 0, 0 | 0.06 |
+| plain + wedge | 12 s + 0.3 s | 1.34, 1.26, 1.26, 1.17, 1.09, 1.00 | 0.90, 0.82, 0.90, 0.90, 0.48, 0.87, 0, 0 | 0.06 |
+
+- wmd removes most of the wedge (plain: six leading factors at r 0.6–0.9 carrying ~1.2 % each); PC2–6 of wmd still
+  follow the wedge moderately (r ≈ 0.54, near-equal eigenvalues 0.34–0.41 %, striped eigenvolumes) — likely
+  wedge-shaped *noise*: d_i only has support inside W_i, so its noise covariance depends on the orientation.
+- **K = 2 (kmeans, factors 1–8) is a quality split**: 3549 / 2532 particles, ARI 1.00 (also gmm 0.99, ward 0.82);
+  class 1 reaches **15.0 Å** (FSC 0.143) vs 16.3 Å for all 6081 particles; class 2 34.3 Å. Class 2 contains
+  99–100 % of the particles of the three low-CC tomograms (lam7_ts_007, lam4_ts_003, lam5_ts_007: 304 of 313);
+  the other tomograms contribute 17–64 %. Half sets: ARI 0.000 for every method and K (control).
+- **K ≥ 3 with factors 1–8 sorts by wedge orientation**: class/wedge r 0.35–0.45 (K = 3–8), stability ARI 0.70–0.83,
+  weakest Jaccard 0.42–0.60. With factors **1, 7, 8** (wedge factors dropped): class/wedge r ≤ 0.05,
+  K = 3 ARI 0.99 (Jaccard 0.98), K = 6 ARI 0.92 (Jaccard 0.88). → classify now reports `py3staWedgeR` per K
+  and warns when `classify.factors` include factors msa flagged.
+- gmm BIC decreases monotonically up to K = 8 (no minimum): continuous variability, BIC not a K selector here.
+- Timing of classify (6081 × 8): kmeans 2.7 s (GPU, 5 K + 10 bootstraps each), ward 24 s, gmm 24 s.
+
+## `py3sta variance` (2026-10-16)
+
+On-demand voxel-wise variance of a cycle's aligned particles (not a pipeline step; user's decision: no automatic
+mask making). Each particle normalised inside `--norm-mask` (a homogeneous part, e.g. a membrane); variance of
+the wmd differences (default) or plain; optional `--mask` restricts the report (may equal the normalisation
+mask); stats vs the region outside both masks. Synthetic: wmd peaks at the variable blob (> 4× median);
+one state: wmd object/solvent variance 1.15 vs plain 5.2 (plain + own wedge 6.3) — the plain map shows the wedge.
+MIM019 (normalised in the reference mask, bin 2, 30 Å, 6081 particles, ~20 s): variance lowest in the particle core
+(~0.75 normalised units), ~0.95 at the periphery / neighbours; plain adds a bright ring at the particle boundary.
+With a whole-particle normalisation mask the map is mostly noise — the tool is meant for targeted masks.
 
 ## Phase 2 part 3 — MIM019 alignment checks (2026-10-15, RTX A5000)
 
@@ -345,6 +409,12 @@ Files: `data/align_test/` (B/compare_emdb.png shows the fit). EMDB map: `data/em
 
 ## Decisions
 
+- (2026-10-16) `classify.use` (in `classify:`) picks the K passed to select; it is select's parameter (changing
+  it does not re-run classify). Default method kmeans, factors 1–8, K = [2, 3, 4, 6, 8], 20 bootstraps.
+- (2026-10-16) Diagnostic PNGs now (matplotlib optional); interactive views go to the dashboard.
+- (2026-10-16) Plain MSA "with the wedge filter" = each particle filtered with its own wedge, the mean is not.
+- (2026-10-16) `py3sta variance` is a CLI command on demand and does not make masks.
+
 - (2026-10-15) Multi-reference alignment writes the winning reference to **`rlnBestReference`** (user's
   choice of name; not a RELION label) and its CC to `py3staRefCC`; `rlnClassNumber` stays reserved for
   classification.
@@ -425,5 +495,9 @@ reports no torch conflicts. A dedicated py3sta conda env is planned (user).
 conversion need not be precise). All tests pass.
 
 ## Open questions
+
+- (2026-10-16) wmd factors 2–6 on MIM019 still follow the wedge (r ≈ 0.54): exclude flagged factors
+  automatically (`classify.factors: auto`), or whiten the differences per wedge (e.g. divide by the expected noise
+  power of W_i)? For now: a warning and `py3staWedgeR` per K.
 
 - Dedicated py3sta conda env (user will create it); then update CLAUDE.md.
