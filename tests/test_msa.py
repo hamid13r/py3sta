@@ -4,8 +4,8 @@ import pytest
 
 from py3sta.geometry import euler_to_matrix
 from py3sta.io.particles import ParticleSet
-from py3sta.msa import (MSASettings, build_stack, correlation_ratio, eigenvolumes, factor_diagnostics, pca,
-                        wedge_features)
+from py3sta.msa import (MSASettings, build_stack, correlation_ratio, eigenvolumes, factor_diagnostics,
+                        multiple_r, pca, wedge_features)
 from py3sta.reference import make_mask
 from py3sta.stack import StackLocation
 from py3sta.wedge import TiltInfo, wedge_weights
@@ -150,4 +150,9 @@ def test_wedge_features_and_eta():
     np.testing.assert_allclose(wedge_features(M[None]), wedge_features((M @ flip)[None]))
     y = np.array([1.0, 1.1, 0.9, 5.0, 5.1, 4.9])
     assert correlation_ratio(y, ["a"] * 3 + ["b"] * 3) > 0.99
-    assert correlation_ratio(y, ["a", "b"] * 3) < 0.5
+    assert correlation_ratio(y, ["a", "b"] * 3) == 0.0                              # adjusted: below chance
+    assert correlation_ratio(y, ["a", "b"] * 3, adjusted=False) > 0.3
+    rng = np.random.default_rng(0)
+    raw, adj = np.array([(multiple_r(y, F, adjusted=False), multiple_r(y, F)) for y, F in
+                         ((rng.normal(size=30), rng.normal(size=(30, 12))) for _ in range(200))]).T
+    assert raw.mean() > 0.55 and np.median(adj) < 0.1                             # adjusted: ~0 at chance

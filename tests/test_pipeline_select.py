@@ -46,7 +46,8 @@ def chiral_proj(tmp_path):
     _edit_yaml(p.cycle_dir(0) / "cycle.yaml",
                lambda c: (c["reference"]["mask"].update(radius=[66.0], soft=12.0),
                           c["select"].update(step=30.0, bin=1, lowpass=10.0, max_shift=24.0),
-                          c["align"].update(enable=False)))
+                          c["align"].update(enable=False),
+                          c["msa"].update(enable=False)))
     return load_project(p.root)
 
 R2, T2 = euler_to_matrix(20.0, 15.0, -10.0), np.array([1.0, 0.0, -1.0])        # class 2 pose error (voxels)

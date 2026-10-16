@@ -216,6 +216,42 @@ def _particle_block(blocks: dict):
     return blocks["particles"] if "particles" in blocks else next(iter(blocks.values()))
 
 
+def _step_mask(ctx, project, n: int, m):
+    """A step's mask: the 02_reference mask when ``m`` is None, else the step's own MaskConfig."""
+    from ..io.mrc import read_mrc
+    from ..reference import make_mask, resolve_file
+
+    p = project.config
+    if m is None:
+        return read_mrc(project.cycle_dir(n) / get_step("reference").folder / "mask.mrc", mmap=False)[0]
+    mf = None
+    if m.shape == "file":
+        mf = resolve_file(m.file, project.root)
+        ctx.use_files([mf], "mask")
+    return make_mask(p.box, p.apix, m.shape, m.radius, m.soft, m.center, mf)
+
+
+def _tilts(ctx, project, cin) -> dict:
+    """{rlnTomoName: TiltInfo} from the Warp XML files of the cycle input (recorded as inputs)."""
+    from ..wedge import TiltInfo
+
+    p = project.config
+    ctx.use_files(cin.tilt_files.values(), "tilt file")
+    sign = None if p.wedge.sign == "auto" else float(p.wedge.sign)
+    return {t: TiltInfo.from_warp_xml(f, sign) for t, f in cin.tilt_files.items()}
+
+
+def _progress(ctx, total: int):
+    step = max(1, total // 10)
+    last = [0]
+
+    def progress(done, n):
+        if done - last[0] >= step or done == n:
+            last[0] = done
+            ctx.log(f"  {done}/{n}")
+    return progress
+
+
 # ------------------------------------------------------------------- align
 ALIGN_COLUMNS = ("rlnBestReference", "py3staRefCC", "py3staAlignAngle", "py3staAlignShift", "py3staAlignEdge")
 POSE_COLUMNS = ["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi", "rlnOriginXAngst", "rlnOriginYAngst", "rlnOriginZAngst"]
@@ -251,9 +287,7 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
     from ..io.star import read_star, write_star
     from ..mra import MRASettings, align_particles, cone_grid
     from ..poses import apply_delta
-    from ..reference import make_mask, resolve_file
     from ..stack import ParticleStack
-    from ..wedge import TiltInfo
     from .project import PARTICLE_NAME, load_cycle_input
 
     p, a = project.config, c.align
@@ -270,20 +304,8 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
     ctx.use_files(cin.tomograms.values(), "tomogram")
     ref_dir = project.cycle_dir(n) / get_step("reference").folder
     refs = np.array(read_mrc(ref_dir / "references.mrcs", mmap=False)[0]).reshape(-1, p.box, p.box, p.box)
-    if a.mask is None:
-        mask = read_mrc(ref_dir / "mask.mrc", mmap=False)[0]
-    else:
-        m = a.mask
-        mf = None
-        if m.shape == "file":
-            mf = resolve_file(m.file, project.root)
-            ctx.use_files([mf], "mask")
-        mask = make_mask(p.box, p.apix, m.shape, m.radius, m.soft, m.center, mf)
-    tilts = None
-    if a.wedge:
-        ctx.use_files(cin.tilt_files.values(), "tilt file")
-        sign = None if p.wedge.sign == "auto" else float(p.wedge.sign)
-        tilts = {t: TiltInfo.from_warp_xml(f, sign) for t, f in cin.tilt_files.items()}
+    mask = _step_mask(ctx, project, n, a.mask)
+    tilts = _tilts(ctx, project, cin) if a.wedge else None
     settings = MRASettings(levels=[list(map(float, lv)) for lv in a.levels], max_shift=p.align_shift_vox(a.max_shift),
                            lowpass=a.lowpass, highpass=a.highpass, bin=a.bin, wedge=a.wedge, min_gain=a.min_gain)
     device, label = resolve_device(p.compute)
@@ -294,16 +316,8 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
     ctx.log(f"aligning {len(ps)} particles to {len(refs)} reference(s): {nrot} rotations per reference, "
             f"shift <= {settings.max_shift} voxel(s) (x, y, z), bin {a.bin}, {'constrained' if tilts else 'plain'} CC"
             + (f", min_gain {a.min_gain}" if a.min_gain else "") + f"; {label}")
-    step = max(1, len(ps) // 10)
-    last = [0]
-
-    def progress(done, total):
-        if done - last[0] >= step or done == total:
-            last[0] = done
-            ctx.log(f"  {done}/{total}")
-
     res = align_particles(ps, ParticleStack.open(project.stack_dir), refs, mask, p.apix, settings, tilts,
-                          invert=p.invert_contrast, device=device, progress=progress)
+                          invert=p.invert_contrast, device=device, progress=_progress(ctx, len(ps)))
     new = apply_delta(ps, res.R, res.t, p.apix)
     names = ps.df[PARTICLE_NAME].astype(str).to_numpy()
     shift_A = np.linalg.norm(res.t, axis=1) * p.apix
@@ -330,6 +344,100 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
     if n_edge > 0.1 * len(ps):
         ctx.warn(f"{n_edge} of {len(ps)} particles at the edge of the search (first level range or shift limit): "
                  "widen align.levels[0] / align.max_shift")
+
+
+# --------------------------------------------------------------------- msa
+WEDGE_FACTOR_R = 0.5                                       # warn: a leading factor follows the wedge
+
+
+def msa_params(p: ProjectConfig, c: CycleConfig) -> dict:
+    return {"msa": dataclasses.asdict(c.msa), "box": p.box, "apix": p.apix, "ts_apix": p.ts_apix,
+            "invert_contrast": p.invert_contrast, "wedge": dataclasses.asdict(p.wedge),
+            "particle_radius": p.norm_radius_vox * p.apix, "pose_source": _source_name("msa")}
+
+
+def pc_columns(k: int) -> list[str]:
+    return [f"py3staPC{j + 1}" for j in range(k)]
+
+
+def run_msa(ctx, project, n: int, c: CycleConfig) -> None:
+    """MSA stack of the active particles at their current poses (msa.py) and its PCA -> msa.star (scores
+    py3staPC1..n), scores.npy, eigenvolumes.mrcs (average + eigenvolumes, binned), scree.star,
+    factors.star (wedge / tomogram / height / CC correlation per factor), pca.npz, PNGs."""
+    import pandas as pd
+
+    from .. import plots
+    from ..io.mrc import open_volume_stack
+    from ..io.star import write_star
+    from ..msa import MSASettings, build_stack, eigenvolumes, factor_diagnostics, pca
+    from ..stack import ParticleStack
+    from .project import PARTICLE_NAME, load_cycle_input
+
+    p, m = project.config, c.msa
+    if not m.enable:
+        ctx.info.update(enabled=False)
+        ctx.log("msa disabled")
+        return
+    path, src = pose_star(project, n, "msa")
+    ctx.read_star(path)
+    cin = load_cycle_input(project, n, path)
+    ctx.use_files(cin.tomograms.values(), "tomogram")
+    mask = _step_mask(ctx, project, n, m.mask)
+    s = MSASettings(mode=m.mode, wedge=m.wedge, bin=m.bin, lowpass=m.lowpass, highpass=m.highpass, n_factors=m.n_factors)
+    tilts = _tilts(ctx, project, cin) if s.uses_wedge else None
+    device, label = resolve_device(p.compute)
+    ps = cin.particles
+    what = {"wmd": "wedge-masked differences", "plain": "plain" + (" (own wedge)" if m.wedge else "")}[m.mode]
+    ctx.log(f"MSA stack of {len(ps)} particles ({cin.n_excluded} excluded): {what}, bin {m.bin} "
+            f"(box {p.box // m.bin}), lowpass {m.lowpass} Å; {label}")
+    st = build_stack(ps, ParticleStack.open(project.stack_dir), mask, p.apix, s, tilts, invert=p.invert_contrast,
+                     device=device, progress=_progress(ctx, 2 * len(ps) if m.mode == "wmd" else len(ps)))
+    k = min(m.n_factors, len(ps) - 1, st.X.shape[1])
+    if k < m.n_factors:
+        ctx.warn(f"only {k} factors possible ({len(ps)} particles)")
+    res = pca(st.X, k, device=device)
+    names = ps.df[PARTICLE_NAME].astype(str).to_numpy()
+    cols = pc_columns(k)
+    table = pd.DataFrame(res.scores, columns=cols)
+    table.insert(0, PARTICLE_NAME, names)
+    write_star({"particles": table.round(6)}, ctx.output_star("msa.star"))
+    np.save(ctx.output("scores.npy"), res.scores)
+    np.savez(ctx.output("pca.npz"), vectors=res.vectors, mean=res.mean, voxels=st.voxels, weights=st.weights,
+             eigenvalues=res.eigenvalues, box=st.box, apix=st.apix)
+    ev = eigenvolumes(st, res)
+    out = open_volume_stack(ctx.output("eigenvolumes.mrcs"), len(ev), st.box, np.float32, st.apix, mode="w+")
+    out[:] = ev
+    out.flush()
+    scree = pd.DataFrame({"py3staFactor": np.arange(1, k + 1), "py3staEigenvalue": res.eigenvalues,
+                          "py3staVarFraction": res.var_fraction, "py3staVarCumulative": np.cumsum(res.var_fraction)})
+    write_star({"scree": scree.round(6)}, ctx.output_star("scree.star"))
+    extra = {"height": ps.centers_px[:, 2]}
+    if "py3staRefCC" in ps.df:
+        extra["refcc"] = ps.df["py3staRefCC"].to_numpy(float)
+    diag = factor_diagnostics(res.scores, ps.matrices, ps.df["rlnTomoName"].to_numpy(), extra)
+    write_star({"factors": diag}, ctx.output_star("factors.star"))
+    lead = diag.head(min(8, k))
+    wedge_like = lead.loc[lead["wedge_r"] > WEDGE_FACTOR_R, "factor"].tolist()
+    if plots.available():
+        tag = f"cycle {n:03d}, {what}"
+        plots.scree(ctx.output("scree.png"), res.var_fraction, f"scree: {tag}")
+        show = min(12, k)
+        plots.volume_views(ctx.output("eigenvolumes.png"), ev[:show + 1],
+                            ["average"] + [f"PC{j + 1}" for j in range(show)], [False] + [True] * show,
+                            f"eigenvolumes (projections): {tag}")
+        plots.factor_bars(ctx.output("factors.png"), diag, ["wedge_r", "tomo_eta", "height_r", "refcc_r"],
+                          WEDGE_FACTOR_R, f"factor correlations: {tag}")
+    else:
+        ctx.warn("matplotlib not installed: no PNGs (pip install matplotlib)")
+    ctx.info.update(enabled=True, n_particles=len(ps), pose_source=src, mode=m.mode, n_factors=k, box=st.box,
+                    n_voxels=int(st.X.shape[1]), var_fraction=[round(float(v), 4) for v in res.var_fraction[:8]],
+                    wedge_r=[float(v) for v in lead["wedge_r"]], wedge_factors=wedge_like)
+    ctx.log(f"{k} factors; variance of factors 1-{len(lead)}: "
+            + ", ".join(f"{100 * v:.1f}%" for v in res.var_fraction[:len(lead)])
+            + "; wedge r: " + ", ".join(f"{v:.2f}" for v in lead["wedge_r"]))
+    if wedge_like:
+        ctx.warn(f"factor(s) {wedge_like} follow the missing-wedge orientation (r > {WEDGE_FACTOR_R}; factors.png)"
+                 + ("; use msa.mode: wmd" if m.mode == "plain" else ""))
 
 
 # ---------------------------------------------------------------- classify
@@ -547,7 +655,7 @@ STEPS: tuple[Step, ...] = (
     Step("reference", "02_reference", reference_upstream, reference_params, run_reference),
     Step("align", "03_align", _with_pose_source("align", ("reference",)), align_params, run_align,
          poses="aligned.star"),
-    Step("msa", "04_msa", ("align",)),
+    Step("msa", "04_msa", _with_pose_source("msa", ("reference",)), msa_params, run_msa),
     Step("classify", "05_classify", _with_pose_source("classify", classify_upstream), classify_params, run_classify),
     Step("embed", "06_embed", ("classify",)),
     Step("select", "07_select", _with_pose_source("select", ("classify", "reference")), select_params, run_select,

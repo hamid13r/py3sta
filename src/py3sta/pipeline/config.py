@@ -24,6 +24,7 @@ REFERENCE_MODES = ("global", "file", "classes")
 MASK_SHAPES = ("sphere", "ellipsoid", "box", "file")
 STACK_DTYPES = ("float16", "float32")
 CLASSIFY_METHODS = ("column",)
+MSA_MODES = ("wmd", "plain")
 
 
 class ConfigError(ValueError):
@@ -152,6 +153,18 @@ class AlignConfig:
 
 
 @dataclass
+class MSAConfig:
+    enable: bool = True                         # false: no MSA (classify.method column only)
+    mode: str = "wmd"                           # wmd: wedge-masked differences | plain: x - mean (i3)
+    wedge: bool = True                          # plain: filter each particle with its own wedge first
+    mask: typing.Optional[MaskConfig] = None    # null: the reference mask (02_reference/mask.mrc)
+    bin: int = 2
+    lowpass: typing.Optional[float] = 30.0      # Å
+    highpass: typing.Optional[float] = None     # Å
+    n_factors: int = 20
+
+
+@dataclass
 class ClassifyConfig:
     method: str = "column"                      # column: classes from an integer STAR column (kmeans etc. later)
     column: str = "rlnClassNumber"              # method column; a missing column = one class
@@ -177,6 +190,7 @@ class CycleConfig:
     average: AverageConfig = field(default_factory=AverageConfig)
     reference: ReferenceConfig = field(default_factory=ReferenceConfig)
     align: AlignConfig = field(default_factory=AlignConfig)
+    msa: MSAConfig = field(default_factory=MSAConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
     select: SelectConfig = field(default_factory=SelectConfig)
     schema: int = SCHEMA
@@ -246,6 +260,23 @@ class CycleConfig:
                           f"{a.lowpass:g} Å is beyond Nyquist of the binned search ({2 * project.apix * a.bin:g} Å)")
             err.check(not a.wedge or project.wedge.use or not a.enable, "align.wedge",
                       "needs tilt information (wedge.use: true in project.yaml); or set align.wedge: false")
+        ms = self.msa
+        err.choice(ms.mode, MSA_MODES, "msa.mode")
+        for key, v in (("lowpass", ms.lowpass), ("highpass", ms.highpass)):
+            err.check(v is None or v > 0, f"msa.{key}", f"must be > 0 Å or null (got {v})")
+        err.check(ms.bin >= 1, "msa.bin", f"must be >= 1 (got {ms.bin})")
+        err.check(ms.n_factors >= 1, "msa.n_factors", f"must be >= 1 (got {ms.n_factors})")
+        if ms.mask is not None:
+            err.choice(ms.mask.shape, MASK_SHAPES, "msa.mask.shape")
+        if project is not None and ms.enable:
+            err.check(project.box % ms.bin == 0, "msa.bin", f"box {project.box} is not divisible by {ms.bin}")
+            if ms.lowpass:
+                err.check(ms.lowpass >= 2 * project.apix * ms.bin, "msa.lowpass",
+                          f"{ms.lowpass:g} Å is beyond Nyquist of the binned MSA stack ({2 * project.apix * ms.bin:g} Å)")
+            uses_wedge = ms.mode == "wmd" or ms.wedge
+            err.check(not uses_wedge or project.wedge.use, "msa.mode",
+                      f"{ms.mode}{' + wedge' if ms.mode == 'plain' else ''} needs tilt information (wedge.use: true in "
+                      "project.yaml); or use mode: plain with wedge: false")
         err.choice(self.classify.method, CLASSIFY_METHODS, "classify.method")
         sel = self.select
         err.check(sel.align == "all" or isinstance(sel.align, list), "select.align",
@@ -276,6 +307,9 @@ class CycleConfig:
         c.select.lowpass = c.reference.lowpass
         c.align.lowpass = c.reference.lowpass
         c.align.wedge = project.wedge.use
+        c.msa.lowpass = c.reference.lowpass
+        if not project.wedge.use:
+            c.msa.mode, c.msa.wedge = "plain", False
         c.select.max_shift = _round(0.1 * box)
         return c
 
@@ -302,6 +336,8 @@ CYCLE_HEADER = """\
 # align: levels [[nut, nstep, spin, sstep], ...] coarse to fine around the current pose (deg); max_shift Å per axis
 #   or [x, y, z] along the tomogram axes (<= stack.margin - 2 voxels; z is the noisiest: missing wedge);
 #   mask: null = reference mask; min_gain: opt-in, keep a particle's pose unless the CC improves by >= min_gain
+# msa: mode wmd (wedge-masked differences: no missing-wedge factors) | plain (x - mean, i3; wedge: true filters
+#   each particle with its own wedge); mask: null = reference mask; bin, lowpass / highpass Å; n_factors
 # classify.method: column (classes from classify.column; missing column = one class)
 # select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
 #   target: reference (02_reference, reference 1) or an MRC path; lowpass / highpass / max_shift in Å, step in deg

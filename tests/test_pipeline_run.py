@@ -61,7 +61,8 @@ def proj(tmp_path):
     p = init_project(tmp_path / "proj", star, backend="numpy", jobs=1, margin=3).project
     _edit_yaml(p.cycle_dir(0) / "cycle.yaml", lambda c: (c["reference"]["mask"].update(radius=[60.0], soft=10.0),
                                                          c["select"].update(step=30.0, bin=1),
-                                                         c["align"].update(enable=False)))
+                                                         c["align"].update(enable=False),
+                                                         c["msa"].update(enable=False)))
     return load_project(p.root)
 
 
@@ -244,7 +245,7 @@ def test_status_and_cli(proj):
     assert st.drift_warning == 0 and st.cycles[0].n_particles == 40
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "reference", "--to", "reference"])
     assert r.exit_code == 0 and "1 reference(s)" in r.output, r.output
-    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "msa", "--to", "msa"])
+    r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "embed", "--to", "embed"])
     assert r.exit_code != 0 and "no implemented step" in r.output
     r = CliRunner().invoke(main, ["run", str(proj.root), "0", "--from", "final"])
     assert r.exit_code != 0 and "upstream step select is stale" in r.output and "upstream reference re-run" in r.output

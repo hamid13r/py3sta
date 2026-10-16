@@ -336,30 +336,44 @@ def wedge_features(mats) -> np.ndarray:
     return np.concatenate(out, 1)
 
 
-def multiple_r(y, F) -> float:
-    """Multiple correlation of y with the columns of F (least squares with an intercept)."""
+def _adjusted(r2: float, n: int, p: int) -> float:
+    """sqrt of the adjusted R^2 (chance level ~0 for any n, p): 1 - (1 - R^2) (n - 1) / (n - p - 1)."""
+    if n - p - 1 <= 0:
+        return float("nan")
+    return float(math.sqrt(max(0.0, 1 - (1 - r2) * (n - 1) / (n - p - 1))))
+
+
+def multiple_r(y, F, adjusted: bool = True) -> float:
+    """Multiple correlation of y with the columns of F (least squares with an intercept); ``adjusted``
+    corrects for the number of columns (12 random features give R ~ sqrt(12 / n) otherwise)."""
     y = np.asarray(y, float)
-    A = np.column_stack([np.ones(len(y)), np.asarray(F, float)])
+    F = np.asarray(F, float)
+    A = np.column_stack([np.ones(len(y)), F])
     coef = np.linalg.lstsq(A, y, rcond=None)[0]
     r = y - A @ coef
     ss = ((y - y.mean()) ** 2).sum()
-    return float(math.sqrt(max(0.0, 1 - (r @ r) / ss))) if ss > 0 else 0.0
+    if ss == 0:
+        return 0.0
+    r2 = max(0.0, 1 - (r @ r) / ss)
+    return _adjusted(r2, len(y), F.shape[1]) if adjusted else float(math.sqrt(r2))
 
 
-def correlation_ratio(y, groups) -> float:
-    """eta: how much of the variance of y is explained by a categorical variable (one-way ANOVA)."""
+def correlation_ratio(y, groups, adjusted: bool = True) -> float:
+    """eta: how much of the variance of y is explained by a categorical variable (one-way ANOVA);
+    ``adjusted`` corrects for the number of groups."""
     y = np.asarray(y, float)
     groups = np.asarray(groups)
     ss = ((y - y.mean()) ** 2).sum()
-    if ss == 0:
+    g = np.unique(groups)
+    if ss == 0 or len(g) < 2:
         return 0.0
-    between = sum(len(y[groups == g]) * (y[groups == g].mean() - y.mean()) ** 2 for g in np.unique(groups))
-    return float(math.sqrt(between / ss))
+    between = sum(len(y[groups == v]) * (y[groups == v].mean() - y.mean()) ** 2 for v in g)
+    return _adjusted(between / ss, len(y), len(g) - 1) if adjusted else float(math.sqrt(between / ss))
 
 
 def factor_diagnostics(scores, mats, tomos=None, extra: dict | None = None):
-    """Per factor: wedge_r (multiple correlation with the wedge orientation), tomo_eta (with the
-    tomogram), and |r| with each ``extra`` column (e.g. z height, alignment CC). DataFrame, one row per
+    """Per factor: wedge_r (adjusted multiple correlation with the wedge orientation), tomo_eta (adjusted
+    correlation ratio with the tomogram), and |r| with each ``extra`` column (e.g. z height, alignment CC). DataFrame, one row per
     factor (1-based ``factor``)."""
     import pandas as pd
 
