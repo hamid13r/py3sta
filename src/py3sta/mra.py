@@ -126,17 +126,26 @@ def prepare(refs, mask, apix: float, s: MRASettings) -> Prepared:
     if box % s.bin:
         raise ValueError(f"box {box} is not divisible by bin {s.bin}")
     b = box // s.bin
-    nyq = 2 * apix * s.bin
-    lowpass = max(s.lowpass, nyq) if s.lowpass else (nyq if s.bin > 1 else None)
-
-    def shrink(v):
-        return fit_box(resample(v, apix, apix * s.bin)[0], b) if s.bin > 1 else np.asarray(v, np.float32)
+    lowpass = search_lowpass(s.lowpass, apix, s.bin)
 
     w = bandpass_filter(b, apix * s.bin, lowpass, s.highpass)
-    out = np.stack([np.fft.irfftn(np.fft.rfftn(shrink(r)) * w, s=(b,) * 3, axes=(0, 1, 2)) for r in refs])
-    m = np.clip(shrink(mask), 0, 1) * extraction_sphere(b)
+    out = np.stack([np.fft.irfftn(np.fft.rfftn(shrink(r, apix, s.bin)) * w, s=(b,) * 3, axes=(0, 1, 2))
+                    for r in refs])
+    m = np.clip(shrink(mask, apix, s.bin), 0, 1) * extraction_sphere(b)
     return Prepared(out.astype(np.float32), m.astype(np.float32), b, s.bin, apix,
                     max(0, int(math.floor(max(shift_limits(s.max_shift)) / s.bin))), lowpass, s.highpass)
+
+
+def shrink(vol, apix: float, bin: int) -> np.ndarray:
+    """Fourier-resample a cube to ``bin`` times the voxel size (box // bin voxels)."""
+    vol = np.asarray(vol, np.float32)
+    return fit_box(resample(vol, apix, apix * bin)[0], vol.shape[0] // bin) if bin > 1 else vol
+
+
+def search_lowpass(lowpass, apix: float, bin: int):
+    """Effective low-pass (Å) of a binned search: never beyond the binned Nyquist."""
+    nyq = 2 * apix * bin
+    return max(lowpass, nyq) if lowpass else (nyq if bin > 1 else None)
 
 
 def shift_limits(max_shift) -> np.ndarray:
