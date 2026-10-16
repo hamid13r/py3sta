@@ -13,6 +13,8 @@ dependencies = ["numpy", "scipy", "pandas", "click", "pyyaml"]
 test = ["pytest", "scipy"]
 # CUDA 12.x driver: pip install torch --index-url https://download.pytorch.org/whl/cu121
 gpu = ["torch>=2.1"]
+classify = ["scikit-learn>=1.3", "umap-learn"]      # hdbscan, space: umap
+plots = ["matplotlib"]                               # diagnostic PNGs of the steps
 
 [project.scripts]
 py3sta = "py3sta.cli:main"

@@ -72,3 +72,29 @@ def test_stability_flags_noise_classes():
     assert s6.ari_mean < s3.ari_mean and s6.jaccard.min() < 0.8
     st = stability(X, y, lambda Z: kmeans(Z, 3).labels, n_boot=3)
     assert len(st.ari) == 3 and st.jaccard.shape == (3,)
+
+
+def test_hdbscan_finds_k_and_noise():
+    pytest.importorskip("sklearn")
+    from py3sta.cluster import hdbscan
+
+    X, y = blobs(sizes=(80, 60, 40), seed=6)
+    rng = np.random.default_rng(0)
+    X = np.vstack([X, rng.uniform(-10, 16, (10, X.shape[1]))])
+    r = hdbscan(X, min_cluster_size=15)
+    assert r.k == 3 and ari(r.labels[:180], y) > 0.9
+    assert r.extra["n_noise"] >= 5 and (r.labels[r.labels > 0] >= 1).all()
+    assert r.counts.tolist() == sorted(r.counts.tolist(), reverse=True)
+
+
+def test_umap_embed_and_cramers_v():
+    pytest.importorskip("umap")
+    from py3sta.cluster import cramers_v, umap_embed
+
+    X, y = blobs(seed=7)
+    E = umap_embed(X, n_neighbors=15, n_components=2, seed=1)
+    assert E.shape == (len(X), 2)
+    np.testing.assert_allclose(umap_embed(X, n_neighbors=15, n_components=2, seed=1), E)       # reproducible
+    assert ari(kmeans(E, 3).labels, y) > 0.95
+    assert cramers_v(y, y) == pytest.approx(1.0) and cramers_v(y, np.zeros_like(y)) == 0.0
+    assert cramers_v(y, np.random.default_rng(0).integers(0, 3, len(y))) < 0.25

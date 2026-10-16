@@ -22,7 +22,8 @@ src/py3sta/
   msa.py             MSA stack at the current poses (wmd = wedge-masked differences | plain ± own wedge),
                      randomized PCA (numpy + torch), wedge / tomogram factor diagnostics
   variance.py        voxel-wise variance of the aligned particles (wmd / plain), normalised in a chosen mask
-  cluster.py         kmeans (numpy + torch), Ward, GMM (BIC), classes by size, ARI, bootstrap stability
+  cluster.py         kmeans (numpy + torch), Ward, GMM (BIC), HDBSCAN, UMAP embedding, classes by size, ARI,
+                     bootstrap stability
   plots.py           diagnostic PNGs of the steps (matplotlib optional); interactive views go to the dashboard
   align.py           map-to-map alignment: resample, SO(3) grid, masked CC over shifts (numpy + torch), polish, mirror
   reference.py       masks (sphere/ellipsoid/box/file, soft edges in Å), band-pass, fit_box, prepare_reference
@@ -32,8 +33,8 @@ src/py3sta/
                      particles.py (ParticleSet = RELION-4 particle table + tomo_key naming)
   pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks, next_cycle), flags.py (flag), variance.py (py3sta variance),
                      manifest.py (run_step, change tracking, states), steps.py (step order, pose sources,
-                     01_average, 02_reference, 03_align, 04_msa, 05_classify (kmeans/ward/gmm per K, column),
-                     07_select, 08_final), runner.py (run_cycle, status)
+                     01_average, 02_reference, 03_align, 04_msa, 07_select, 08_final), classify.py (05_classify:
+                     named runs, per-run cache, comparison), runner.py (run_cycle, status)
   utils/             stand-alone utilities (each also `python -m py3sta.utils.<name>`), e.g. add_warp_xml
 tests/               pytest; scipy/torch tests auto-skip when not installed
 scripts/check_torch.py   GPU vs numpy parity + timing on real data

@@ -23,7 +23,9 @@ WEDGE_SIGNS = ("auto", 1, -1)
 REFERENCE_MODES = ("global", "file", "classes")
 MASK_SHAPES = ("sphere", "ellipsoid", "box", "file")
 STACK_DTYPES = ("float16", "float32")
-CLASSIFY_METHODS = ("column", "kmeans", "ward", "gmm")
+CLASSIFY_METHODS = ("kmeans", "ward", "gmm", "hdbscan", "column")
+CLASSIFY_SPACES = ("pca", "umap")
+RUN_NAME_RE = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 MSA_MODES = ("wmd", "plain")
 
 
@@ -165,16 +167,153 @@ class MSAConfig:
 
 
 @dataclass
-class ClassifyConfig:
-    method: str = "kmeans"                      # kmeans | ward | gmm (on MSA factors) | column (an integer STAR column)
-    column: str = "rlnClassNumber"              # method column; a missing column = one class
+class UmapConfig:
+    n_neighbors: int = 30
+    min_dist: float = 0.1
+    n_components: int = 5                       # dimensions clustered (the 2D view for plots is separate)
+    metric: str = "euclidean"
+
+
+@dataclass
+class ClassifyRun:
+    """One classification run: a method on MSA factors (in PCA or UMAP space) for a list of K."""
+    method: str = "kmeans"                      # kmeans | ward | gmm | hdbscan | column
+    column: str = "rlnClassNumber"              # method column: an integer STAR column; a missing column = one class
     factors: typing.List[int] = field(default_factory=lambda: list(range(1, 9)))  # MSA factors used (i3 CLSFACT)
-    k: typing.List[int] = field(default_factory=lambda: [2, 3, 4, 6, 8])          # numbers of classes tried
-    use: typing.Optional[int] = None            # the K passed on to select (null: the only K in k)
+    k: typing.List[int] = field(default_factory=lambda: [2, 3, 4, 6, 8])          # numbers of classes (not hdbscan)
+    space: str = "pca"                          # pca: factor scores | umap: UMAP embedding of the factor scores
+    umap: UmapConfig = field(default_factory=UmapConfig)
+    min_cluster_size: int = 50                  # hdbscan
+    min_samples: typing.Optional[int] = None    # hdbscan (null = min_cluster_size)
     standardize: bool = False                   # scale each factor to unit variance first
     n_init: int = 10                            # kmeans / gmm restarts
     bootstrap: int = 20                         # stability: re-clusterings of random 80 % subsets (0 = off)
     seed: int = 0
+    averages: bool = True                       # class averages (needed by select; ~1 full average per K)
+
+
+@dataclass
+class ClassifyConfig(ClassifyRun):
+    """The fields above are the defaults of every run. ``runs`` (null = one run with these settings, named
+    after the method) lists named runs: {name: {settings}} or [{name: .., settings}, ...] (no name: automatic)."""
+    runs: typing.Any = None
+    use: typing.Optional[typing.Union[int, str]] = None  # classification passed to select: run/K004, run (one
+                                                # classification), K (one run); null = the only one
+
+    def resolved_runs(self, where: str = "cycle.yaml") -> dict:
+        """{name: ClassifyRun} with every run's settings merged over the defaults."""
+        import copy
+        import re
+
+        base = {f.name: getattr(self, f.name) for f in dataclasses.fields(ClassifyRun)}
+        base = copy.deepcopy(dataclasses.asdict(ClassifyRun(**base)))
+        if self.runs is None:
+            items = [(None, {})]
+        elif isinstance(self.runs, dict):
+            items = list(self.runs.items())
+        elif isinstance(self.runs, list):
+            items = []
+            for i, r in enumerate(self.runs):
+                if not isinstance(r, dict):
+                    raise ConfigError(f"{where}: classify.runs[{i}]: expected a mapping, got {r!r}")
+                r = dict(r)
+                items.append((r.pop("name", None), r))
+        else:
+            raise ConfigError(f"{where}: classify.runs: expected a mapping of named runs or a list, got {self.runs!r}")
+        out = {}
+        for name, r in items:
+            if r is None:
+                r = {}
+            if not isinstance(r, dict):
+                raise ConfigError(f"{where}: classify.runs.{name}: expected a mapping, got {r!r}")
+            d = copy.deepcopy(base)
+            for k, v in r.items():
+                if k == "umap" and isinstance(v, dict):
+                    d["umap"] = {**d["umap"], **v}
+                else:
+                    d[k] = v
+            label = f"classify.runs.{name}." if name is not None else "classify.runs[]."
+            run = from_dict(ClassifyRun, d, where, label if self.runs is not None else "classify.")
+            if name is None:
+                name = run.method if self.runs is None else auto_run_name(run)
+            name = str(name)
+            if not re.match(RUN_NAME_RE, name):
+                raise ConfigError(f"{where}: classify.runs: run name {name!r}: letters, digits, _ . - only")
+            if name in out:
+                raise ConfigError(f"{where}: classify.runs: run name {name!r} used twice")
+            out[name] = run
+        return out
+
+
+def _ranges(v) -> str:
+    v = sorted(v)
+    parts, i = [], 0
+    while i < len(v):
+        j = i
+        while j + 1 < len(v) and v[j + 1] == v[j] + 1:
+            j += 1
+        parts.append(f"{v[i]}-{v[j]}" if j > i else str(v[i]))
+        i = j + 1
+    return "_".join(parts)
+
+
+def run_tags(r: ClassifyRun) -> list:
+    """Classification tags of a run: K002, K003, ... or 'all' (column, hdbscan: one classification)."""
+    return ["all"] if r.method in ("column", "hdbscan") else [f"K{k:03d}" for k in r.k]
+
+
+def resolve_use(use, runs: dict) -> tuple:
+    """(run name, tag) of the classification passed to select. use: 'run/K004' | 'run/4' | 'run' (a run with one
+    classification) | K or 'K004' (one run) | None (exactly one classification)."""
+    import re
+
+    def tag_of(run, k):
+        t = f"K{int(k):03d}"
+        if t not in run_tags(runs[run]):
+            raise ValueError(f"run {run!r} has no K={int(k)} (tags: {', '.join(run_tags(runs[run]))})")
+        return t
+
+    def single(run):
+        tags = run_tags(runs[run])
+        if len(tags) != 1:
+            raise ValueError(f"run {run!r} has several classifications ({', '.join(tags)}): use {run}/<K>")
+        return tags[0]
+
+    options = ", ".join(f"{n}/{t}" for n, r in runs.items() for t in run_tags(r))
+    if use is None:
+        if len(runs) == 1:
+            run = next(iter(runs))
+            try:
+                return run, single(run)
+            except ValueError:
+                pass
+        raise ValueError(f"set classify.use to the classification passed to select (one of: {options})")
+    if isinstance(use, int):
+        if len(runs) != 1:
+            raise ValueError(f"{use}: several runs, give run/K (one of: {options})")
+        run = next(iter(runs))
+        return run, tag_of(run, use)
+    text = str(use).strip()
+    run, _, k = text.partition("/")
+    if not k and run not in runs and re.fullmatch(r"[Kk]?\d+", run) and len(runs) == 1:
+        run, k = next(iter(runs)), run
+    if run not in runs:
+        raise ValueError(f"{use!r}: no run {run!r} (one of: {options})")
+    if not k:
+        return run, single(run)
+    if k.lower() == "all":
+        return run, single(run)
+    m = re.fullmatch(r"[Kk]?(\d+)", k)
+    if not m:
+        raise ValueError(f"{use!r}: expected run/K (e.g. {run}/K004)")
+    return run, tag_of(run, m.group(1))
+
+
+def auto_run_name(r: ClassifyRun) -> str:
+    """e.g. kmeans_f1-8, hdbscan_umap_f1_7-8, column_rlnRandomSubset."""
+    if r.method == "column":
+        return f"column_{r.column}"
+    return f"{r.method}{'_umap' if r.space == 'umap' else ''}_f{_ranges(r.factors)}"
 
 
 @dataclass
@@ -284,19 +423,41 @@ class CycleConfig:
             err.check(not uses_wedge or project.wedge.use, "msa.mode",
                       f"{ms.mode}{' + wedge' if ms.mode == 'plain' else ''} needs tilt information (wedge.use: true in "
                       "project.yaml); or use mode: plain with wedge: false")
-        cl = self.classify
-        err.choice(cl.method, CLASSIFY_METHODS, "classify.method")
-        if cl.method != "column":
-            err.check(ms.enable, "classify.method", f"{cl.method!r} classifies MSA factors: set msa.enable: true "
+        try:
+            runs = self.classify.resolved_runs(where)
+        except ConfigError as e:
+            err.msgs.append(str(e).split(": ", 1)[1] if str(e).startswith(where) else str(e))
+            runs = {}
+        for name, r in runs.items():
+            key = f"classify.runs.{name}" if self.classify.runs is not None else "classify"
+            err.choice(r.method, CLASSIFY_METHODS, f"{key}.method")
+            if r.method == "column":
+                continue
+            err.choice(r.space, CLASSIFY_SPACES, f"{key}.space")
+            err.check(ms.enable, f"{key}.method", f"{r.method!r} classifies MSA factors: set msa.enable: true "
                       "(or use method: column)")
-            err.check(bool(cl.factors) and len(set(cl.factors)) == len(cl.factors)
-                      and all(1 <= f <= ms.n_factors for f in cl.factors), "classify.factors",
-                      f"must be distinct factor numbers in 1..msa.n_factors ({ms.n_factors}) (got {cl.factors})")
-            err.check(bool(cl.k) and all(k >= 2 for k in cl.k) and len(set(cl.k)) == len(cl.k), "classify.k",
-                      f"must be distinct numbers of classes >= 2 (got {cl.k})")
-            err.check(cl.use is None or cl.use in cl.k, "classify.use", f"must be one of classify.k {cl.k} (got {cl.use})")
-            err.check(cl.n_init >= 1, "classify.n_init", f"must be >= 1 (got {cl.n_init})")
-            err.check(cl.bootstrap >= 0, "classify.bootstrap", f"must be >= 0 (got {cl.bootstrap})")
+            err.check(bool(r.factors) and len(set(r.factors)) == len(r.factors)
+                      and all(1 <= f <= ms.n_factors for f in r.factors), f"{key}.factors",
+                      f"must be distinct factor numbers in 1..msa.n_factors ({ms.n_factors}) (got {r.factors})")
+            if r.method == "hdbscan":
+                err.check(r.min_cluster_size >= 2, f"{key}.min_cluster_size", f"must be >= 2 (got {r.min_cluster_size})")
+                err.check(r.min_samples is None or r.min_samples >= 1, f"{key}.min_samples",
+                          f"must be >= 1 or null (got {r.min_samples})")
+            else:
+                err.check(bool(r.k) and all(k >= 2 for k in r.k) and len(set(r.k)) == len(r.k), f"{key}.k",
+                          f"must be distinct numbers of classes >= 2 (got {r.k})")
+            err.check(r.n_init >= 1, f"{key}.n_init", f"must be >= 1 (got {r.n_init})")
+            err.check(r.bootstrap >= 0, f"{key}.bootstrap", f"must be >= 0 (got {r.bootstrap})")
+            if r.space == "umap":
+                u = r.umap
+                err.check(u.n_neighbors >= 2, f"{key}.umap.n_neighbors", f"must be >= 2 (got {u.n_neighbors})")
+                err.check(0 <= u.min_dist <= 1, f"{key}.umap.min_dist", f"must be in [0, 1] (got {u.min_dist})")
+                err.check(u.n_components >= 1, f"{key}.umap.n_components", f"must be >= 1 (got {u.n_components})")
+        if runs and self.classify.use is not None:
+            try:
+                resolve_use(self.classify.use, runs)
+            except ValueError as e:
+                err.msgs.append(f"classify.use: {e}")
         sel = self.select
         err.check(sel.align == "all" or isinstance(sel.align, list), "select.align",
                   f"must be 'all' or a list of class numbers (got {sel.align!r})")
@@ -357,8 +518,10 @@ CYCLE_HEADER = """\
 #   mask: null = reference mask; min_gain: opt-in, keep a particle's pose unless the CC improves by >= min_gain
 # msa: mode wmd (wedge-masked differences: no missing-wedge factors) | plain (x - mean, i3; wedge: true filters
 #   each particle with its own wedge); mask: null = reference mask; bin, lowpass / highpass Å; n_factors
-# classify.method: kmeans | ward | gmm on the MSA factors listed in classify.factors, one classification per K in
-#   classify.k; use: the K passed to select (null = the only K) | column (classes from classify.column)
+# classify: method kmeans | ward | gmm | hdbscan (on the MSA factors in classify.factors; space pca or umap) | column
+#   (classes from classify.column); one classification per K in classify.k. These fields are the defaults of every
+#   run; classify.runs: {name: {settings}} tries several (each recomputed only when its settings change; see
+#   05_classify/compare.star). use: the classification passed to select: run/K004 | run (one classification) | K
 # select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
 #   target: reference (02_reference, reference 1) or an MRC path; lowpass / highpass / max_shift in Å, step in deg
 """
@@ -420,6 +583,8 @@ def from_dict(cls, data, where: str, prefix: str = ""):
 
 
 def _convert(tp, v, where, key):
+    if tp is typing.Any:
+        return v
     origin, args = typing.get_origin(tp), typing.get_args(tp)
     if dataclasses.is_dataclass(tp):
         return from_dict(tp, v if v is not None else {}, where, key + ".")

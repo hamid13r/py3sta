@@ -98,19 +98,23 @@ def factor_bars(path, table, columns, threshold: float | None = None, title: str
 
 
 def class_scatter(path, xy, labels_by_k: dict, axes=("PC1", "PC2"), title: str = "") -> None:
-    """Scores on two factors, one panel per K, coloured by class."""
+    """Scores on two axes, one panel per classification (key: K or a tag), coloured by class (0 = noise, grey)."""
     plt = _plt()
     ks = list(labels_by_k)
     fig, axs = plt.subplots(1, len(ks), figsize=(3.2 * len(ks), 3.3), squeeze=False)
     for ax, k in zip(axs[0], ks):
         lab = np.asarray(labels_by_k[k])
-        ax.scatter(xy[:, 0], xy[:, 1], c=lab, cmap="tab10" if k <= 10 else "tab20", s=4, vmin=1,
-                   vmax=10 if k <= 10 else 20)
-        for c in range(1, k + 1):
+        kmax = int(lab.max())
+        cmap = "tab10" if kmax <= 10 else "tab20"
+        noise = lab == 0
+        if noise.any():
+            ax.scatter(xy[noise, 0], xy[noise, 1], c="0.75", s=3)
+        ax.scatter(xy[~noise, 0], xy[~noise, 1], c=lab[~noise], cmap=cmap, s=4, vmin=1, vmax=10 if kmax <= 10 else 20)
+        for c in range(1, kmax + 1):
             m = lab == c
             if m.any():
                 ax.annotate(str(c), xy[m].mean(0), fontsize=9, weight="bold", ha="center", va="center")
-        ax.set_title(f"K = {k}", fontsize=9)
+        ax.set_title(f"K = {k}" if isinstance(k, int) else str(k), fontsize=9)
         ax.set_xlabel(axes[0], fontsize=8)
         ax.set_ylabel(axes[1], fontsize=8)
         ax.tick_params(labelsize=7)
@@ -144,21 +148,76 @@ def stability_summary(path, table, title: str = "") -> None:
     """ARI and the weakest class's Jaccard per K (and BIC when present)."""
     plt = _plt()
     k = table["py3staK"].to_numpy()
+    if "py3staTag" in table and len(set(k)) < len(k):        # several classifications with the same K: by order
+        k = np.arange(1, len(k) + 1)
     fig, ax = plt.subplots(figsize=(5.5, 3.5))
-    if "py3staARI" in table:
+    if "py3staARI" in table and np.isfinite(table["py3staARI"].to_numpy(float)).any():
         ax.plot(k, table["py3staARI"], "o-", label="ARI (mean)")
         ax.plot(k, table["py3staJaccardMin"], "s-", label="Jaccard (weakest class)")
         ax.axhline(0.6, ls="--", lw=0.8, color="k")
         ax.set_ylim(0, 1.05)
         ax.set_ylabel("stability")
         ax.legend(fontsize=8, loc="lower left")
-    if "py3staBIC" in table:
+    if "py3staBIC" in table and np.isfinite(table["py3staBIC"].to_numpy(float)).any():
         ax2 = ax.twinx()
         ax2.plot(k, table["py3staBIC"], "^-", color="tab:green", label="BIC")
         ax2.set_ylabel("BIC (lower = better)", color="tab:green")
     ax.set_xticks(k)
     ax.set_xlabel("K")
     ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+
+
+def compare_runs(path, table, title: str = "") -> None:
+    """One bar per classification (run/tag): weakest-class Jaccard, class/wedge r, class/tomogram V, best class
+    resolution."""
+    plt = _plt()
+    lab = (table["py3staRun"] + "/" + table["py3staTag"]).tolist()
+    panels = [("py3staJaccardMin", "weakest class Jaccard (higher = stable)", (0, 1.05), 0.6),
+              ("py3staWedgeR", "class / wedge r (lower = better)", (0, 1.0), 0.3),
+              ("py3staTomoV", "class / tomogram V", (0, 1.0), None),
+              ("py3staBestRes", "best class FSC 0.143 (Å, lower = better)", None, None)]
+    panels = [pn for pn in panels if pn[0] in table and np.isfinite(table[pn[0]].to_numpy(float)).any()]
+    fig, axs = plt.subplots(1, len(panels), figsize=(3.2 * len(panels) + 1.5, 0.28 * len(lab) + 1.6), sharey=True,
+                            squeeze=False)
+    y = np.arange(len(lab))
+    for ax, (col, name, lim, ref) in zip(axs[0], panels):
+        ax.barh(y, table[col].to_numpy(float), color="tab:blue")
+        if lim:
+            ax.set_xlim(*lim)
+        if ref is not None:
+            ax.axvline(ref, ls="--", lw=0.8, color="k")
+        ax.set_title(name, fontsize=8)
+        ax.tick_params(labelsize=7)
+    axs[0, 0].set_yticks(y)
+    axs[0, 0].set_yticklabels(lab, fontsize=7)
+    axs[0, 0].invert_yaxis()
+    if title:
+        fig.suptitle(title, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+
+
+def agreement(path, labels, matrix, title: str = "") -> None:
+    """ARI between every pair of classifications."""
+    plt = _plt()
+    n = len(labels)
+    fig, ax = plt.subplots(figsize=(0.45 * n + 2.5, 0.45 * n + 2))
+    im = ax.imshow(matrix, vmin=0, vmax=1, cmap="viridis")
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(labels, rotation=90, fontsize=7)
+    ax.set_yticklabels(labels, fontsize=7)
+    if n <= 20:
+        for i in range(n):
+            for j in range(n):
+                ax.text(j, i, f"{matrix[i, j]:.2f}", ha="center", va="center", fontsize=6,
+                        color="w" if matrix[i, j] < 0.6 else "k")
+    fig.colorbar(im, ax=ax, fraction=0.04)
+    ax.set_title(title, fontsize=9)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)

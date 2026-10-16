@@ -8,6 +8,8 @@ Every method returns classes 1..K numbered by size (1 = largest), so numbering i
   grows as n^2, refused above WARD_MAX particles.
 * ``gmm`` -- Gaussian mixture, full covariances, EM from the k-means solution; per-particle membership
   probability and BIC (lower is better) to suggest K.
+* ``hdbscan`` -- density-based (scikit-learn): finds the number of classes itself; particles in no dense
+  region are noise (class 0). Usually run on a UMAP embedding of the factors (``umap_embed``, umap-learn).
 * stability -- the clustering is repeated on random 80 % subsets; ARI with the full result on the shared
   particles, and per class the mean best Jaccard overlap with any subset class (Hennig 2007): a class
   below ~0.6 is not reproducible (noise-driven).
@@ -19,7 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-METHODS = ("kmeans", "ward", "gmm")
+METHODS = ("kmeans", "ward", "gmm", "hdbscan")
 WARD_MAX = 30000
 
 
@@ -30,7 +32,7 @@ class ClusterResult:
     method: str
     score: float                            # kmeans: inertia; ward: merge height of the cut; gmm: log likelihood
     bic: float | None = None                # gmm
-    prob: np.ndarray | None = None          # gmm: (n,) probability of the assigned class
+    prob: np.ndarray | None = None          # gmm / hdbscan: (n,) probability of the assigned class
     dist: np.ndarray | None = None          # kmeans: (n,) distance to the class centre
     extra: dict = field(default_factory=dict)
 
@@ -195,6 +197,50 @@ def gmm(X, k: int, max_iter: int = 300, tol: float = 1e-7, reg: float = 1e-6, se
     bic = -2 * ll + n_par * math.log(n)
     return ClusterResult(labels, int(labels.max()), "gmm", ll, bic=bic, prob=R[np.arange(n), lab],
                          extra={"means": mu[order], "weights": w[order]})
+
+
+# ------------------------------------------------------------ HDBSCAN, UMAP
+def hdbscan(X, min_cluster_size: int = 50, min_samples: int | None = None) -> ClusterResult:
+    """Classes 1..K by size, noise = 0 (scikit-learn HDBSCAN)."""
+    from sklearn.cluster import HDBSCAN
+
+    h = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples).fit(np.asarray(X, np.float64))
+    lab = h.labels_
+    labels = np.zeros(len(lab), int)
+    if (lab >= 0).any():
+        labels[lab >= 0] = by_size(lab[lab >= 0])[0]
+    k = int(labels.max())
+    return ClusterResult(labels, k, "hdbscan", float(h.probabilities_.mean()), prob=np.asarray(h.probabilities_),
+                         extra={"n_noise": int((labels == 0).sum())})
+
+
+def umap_embed(X, n_neighbors: int = 30, min_dist: float = 0.1, n_components: int = 5, metric: str = "euclidean",
+               seed: int = 0) -> np.ndarray:
+    """UMAP embedding of the rows of X (umap-learn; reproducible for a fixed seed)."""
+    import warnings
+
+    import umap
+
+    n = len(X)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")                     # n_jobs overridden by random_state
+        return umap.UMAP(n_neighbors=min(n_neighbors, n - 1), min_dist=min_dist, n_components=n_components,
+                         metric=metric, random_state=seed).fit_transform(np.asarray(X, np.float64)).astype(np.float32)
+
+
+def cramers_v(a, b) -> float:
+    """Association of two labelings (0 = independent, 1 = one determines the other)."""
+    a, b = np.asarray(a), np.asarray(b)
+    _, ai = np.unique(a, return_inverse=True)
+    _, bi = np.unique(b, return_inverse=True)
+    if ai.max() == 0 or bi.max() == 0:
+        return 0.0
+    ct = np.zeros((ai.max() + 1, bi.max() + 1))
+    np.add.at(ct, (ai, bi), 1)
+    n = ct.sum()
+    e = ct.sum(1, keepdims=True) * ct.sum(0, keepdims=True) / n
+    chi2 = ((ct - e) ** 2 / e).sum()
+    return float(math.sqrt(chi2 / (n * (min(ct.shape) - 1))))
 
 
 # ---------------------------------------------------------------- stability

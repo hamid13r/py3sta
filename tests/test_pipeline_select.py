@@ -80,8 +80,9 @@ def test_class_transforms_restore_poses(chiral_proj):
     true = _perturb_class2(proj)
     run_cycle(proj, 0)
     cl = proj.cycle_dir(0) / "05_classify"
-    assert read_manifest(cl)["info"]["counts"] == {"1": 8, "2": 8}
-    assert read_mrc(cl / "classes.mrcs")[0].shape == (2 * BOX, BOX, BOX)
+    assert read_manifest(cl)["info"]["classifications"]["column/all"]["k"] == 2
+    assert read_star(cl / "column" / "classes_all.star")["classes"]["py3staClassCount"].tolist() == [8, 8]
+    assert read_mrc(cl / "column" / "classes_all.mrcs")[0].shape == (2 * BOX, BOX, BOX)
     tr = read_star(proj.cycle_dir(0) / "07_select" / "transforms.star")["transforms"].set_index("py3staClass")
     assert list(tr["py3staClassAction"]) == ["align", "align"]
     fin = ParticleSet.from_star(_final(proj))
@@ -115,7 +116,7 @@ def test_classify_tracking_and_validation(proj):
     _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["classify"].update(column="rlnRandomSubset"))
     p = load_project(proj.root)
     st = step_state(p, 0, "classify")
-    assert st.state == "stale" and st.reasons == ["classify.column rlnClassNumber→rlnRandomSubset"]
+    assert st.state == "stale" and st.reasons == ["classify.column.column rlnClassNumber→rlnRandomSubset"]
     assert step_state(p, 0, "final").reasons == ["upstream select stale"]
     sel = p.cycle_dir(0) / "07_select" / "selected.star"
     b = read_star(sel)
@@ -141,4 +142,4 @@ def test_missing_class_column_is_one_class(proj):
     write_star(b, proj.cycle_input(0))
     run_cycle(proj, 0, stop="classify")
     m = read_manifest(proj.cycle_dir(0) / "05_classify")
-    assert m["info"]["n_classes"] == 1 and "no column rlnClassNumber" in m["warnings"][0]
+    assert m["info"]["classifications"]["column/all"]["k"] == 1 and "no column rlnClassNumber" in m["warnings"][0]
