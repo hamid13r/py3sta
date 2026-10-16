@@ -62,7 +62,8 @@ def proj(tmp_path):
     _edit_yaml(p.cycle_dir(0) / "cycle.yaml", lambda c: (c["reference"]["mask"].update(radius=[60.0], soft=10.0),
                                                          c["select"].update(step=30.0, bin=1),
                                                          c["align"].update(enable=False),
-                                                         c["msa"].update(enable=False)))
+                                                         c["msa"].update(enable=False),
+                                                         c["classify"].update(method="column")))
     return load_project(p.root)
 
 

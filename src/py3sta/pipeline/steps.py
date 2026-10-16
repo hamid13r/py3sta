@@ -442,6 +442,7 @@ def run_msa(ctx, project, n: int, c: CycleConfig) -> None:
 
 # ---------------------------------------------------------------- classify
 CLASS_COLUMN = "py3staClass"
+STABLE_JACCARD = 0.6                                       # a class below this is not reproducible
 
 
 def classify_upstream(c: CycleConfig) -> tuple:
@@ -449,22 +450,63 @@ def classify_upstream(c: CycleConfig) -> tuple:
 
 
 def classify_params(p: ProjectConfig, c: CycleConfig) -> dict:
-    return {"classify": dataclasses.asdict(c.classify), **average_params(p, c), "pose_source": _source_name("classify")}
+    cl = dataclasses.asdict(c.classify)
+    cl.pop("use")                                          # select's choice: does not change the classifications
+    if c.classify.method == "column":
+        cl = {"method": "column", "column": cl["column"]}
+    else:
+        cl.pop("column")
+    return {"classify": cl, **average_params(p, c), "pose_source": _source_name("classify")}
 
 
-def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
-    """method column: classes from an integer STAR column (placeholder until MSA + k-means exist);
-    class averages from the stack with the cycle's averaging settings."""
-    import pandas as pd
+def k_tag(k: int) -> str:
+    return f"K{k:03d}"
 
+
+def classification_files(c: CycleConfig) -> tuple[str, str, str]:
+    """(per-particle class STAR, classes STAR, class averages) of the classification select uses."""
+    cl = c.classify
+    if cl.method == "column":
+        return "class_column.star", "classes.star", "classes.mrcs"
+    k = cl.use if cl.use is not None else (cl.k[0] if len(cl.k) == 1 else None)
+    if k is None:
+        raise ValueError(f"classify ran K = {', '.join(map(str, cl.k))}: set classify.use to the K passed to select "
+                         "(see 05_classify/summary.star and the PNGs)")
+    return f"class_{cl.method}_{k_tag(k)}.star", f"classes_{k_tag(k)}.star", f"classes_{k_tag(k)}.mrcs"
+
+
+def _class_averages(ctx, project, cin, cls, ids, average, tag: str):
+    """Class averages (classes{tag}.mrcs) and per-class rows (count, fraction, FSC 0.143 resolution)."""
+    from ..average import fsc, resolution_at
     from ..io.mrc import open_volume_stack
-    from ..io.star import write_star
-    from .project import PARTICLE_NAME, load_cycle_input
 
     p = project.config
-    path, src = pose_star(project, n, "classify")
-    ctx.read_star(path)
-    cin = load_cycle_input(project, n, path)
+    df = cin.particles.df
+    out = open_volume_stack(ctx.output(f"classes{tag}.mrcs"), len(ids), p.box, np.float32, p.apix, mode="w+")
+    rows = []
+    vols = []
+    for k, cid in enumerate(ids):
+        sel = cls == cid
+        members = dataclasses.replace(cin.particles, df=df[sel].reset_index(drop=True))
+        res = average(members)
+        out[k] = res.average
+        vols.append(res.average)
+        row = {CLASS_COLUMN: int(cid), "py3staClassIndex": k + 1, "py3staClassCount": int(sel.sum()),
+               "py3staClassFraction": round(float(sel.mean()), 4), "py3staClassRes": np.nan}
+        if res.halves is not None and sel.sum() >= 4:
+            r, f = fsc(*res.halves, res.apix)
+            row["py3staClassRes"] = round(float(resolution_at(r, f)), 1)
+        rows.append(row)
+    out.flush()
+    return rows, vols
+
+
+def _classify_column(ctx, project, n: int, c: CycleConfig, cin, path) -> None:
+    import pandas as pd
+
+    from ..io.star import write_star
+    from .project import PARTICLE_NAME
+
     df = cin.particles.df
     col = c.classify.column
     if col not in df:
@@ -478,27 +520,118 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
         cls = v.astype(int)
     ids = np.unique(cls)
     write_star({"classes": pd.DataFrame({PARTICLE_NAME: df[PARTICLE_NAME].astype(str), CLASS_COLUMN: cls})},
-               ctx.output_star(f"class_{c.classify.method}.star"))
-    average = _averager(ctx, project, c, cin)
-    out = open_volume_stack(ctx.output("classes.mrcs"), len(ids), p.box, np.float32, p.apix, mode="w+")
-    rows = []
-    for k, cid in enumerate(ids):
-        sel = cls == cid
-        members = dataclasses.replace(cin.particles, df=df[sel].reset_index(drop=True))
-        res = average(members)
-        out[k] = res.average
-        rows.append({CLASS_COLUMN: int(cid), "py3staClassIndex": k + 1, "py3staClassCount": int(sel.sum()),
-                     "py3staClassFraction": round(float(sel.mean()), 4)})
-        ctx.log(f"class {cid}: {int(sel.sum())} particles")
-    out.flush()
+               ctx.output_star("class_column.star"))
+    rows, _ = _class_averages(ctx, project, cin, cls, ids, _averager(ctx, project, c, cin), "")
+    for r in rows:
+        ctx.log(f"class {r[CLASS_COLUMN]}: {r['py3staClassCount']} particles")
     write_star({"classes": pd.DataFrame(rows)}, ctx.output_star("classes.star"))
-    ctx.info.update(n_classes=len(ids), counts={int(r[CLASS_COLUMN]): r["py3staClassCount"] for r in rows},
-                    pose_source=src)
+    ctx.info.update(n_classes=len(ids), counts={int(r[CLASS_COLUMN]): r["py3staClassCount"] for r in rows})
+
+
+def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
+    """kmeans / ward / gmm on the MSA factors (cluster.py), one classification per K: class_<method>_K###.star,
+    classes_K###.mrcs (class averages from the stack with the cycle's averaging settings), classes_K###.star,
+    summary.star (stability, BIC), PNGs. method column: classes from an integer STAR column."""
+    import pandas as pd
+
+    from .. import cluster, plots
+    from ..io.star import read_star, write_star
+    from .project import PARTICLE_NAME, load_cycle_input
+
+    cl = c.classify
+    path, src = pose_star(project, n, "classify")
+    ctx.read_star(path)
+    cin = load_cycle_input(project, n, path)
+    ctx.info.update(pose_source=src, method=cl.method)
+    if cl.method == "column":
+        _classify_column(ctx, project, n, c, cin, path)
+        return
+
+    msa_star = project.cycle_dir(n) / get_step("msa").folder / "msa.star"
+    if not msa_star.is_file():
+        raise FileNotFoundError(f"{msa_star}: run the msa step first (msa.enable: true)")
+    ctx.read_star(msa_star)
+    scores = _particle_block(read_star(msa_star))
+    cols = [f"py3staPC{f}" for f in cl.factors]
+    missing = [col for col in cols if col not in scores]
+    if missing:
+        raise ValueError(f"{msa_star.name} has no {', '.join(missing)} (msa computed fewer factors)")
+    names = cin.particles.df[PARTICLE_NAME].astype(str).to_numpy()
+    index = pd.Series(np.arange(len(scores)), index=scores[PARTICLE_NAME].astype(str))
+    if set(index.index) != set(names):
+        raise ValueError(f"{msa_star.name} does not cover the active particles of {path.name} (re-run msa)")
+    X = scores[cols].to_numpy(float)[index.loc[names].to_numpy()]
+    if cl.standardize:
+        X = X / np.where(X.std(0) > 0, X.std(0), 1)
+    device, label = resolve_device(project.config.compute)
+    ctx.log(f"{cl.method} on factors {cl.factors} of {len(X)} particles, K = {cl.k}"
+            + (f", stability from {cl.bootstrap} subsets" if cl.bootstrap else "")
+            + (f"; {label}" if cl.method == "kmeans" else ""))
+    results, Z = cluster.run(X, cl.method, cl.k, n_init=cl.n_init, seed=cl.seed,
+                             device=device if cl.method == "kmeans" else None, n_boot=cl.bootstrap)
+    if Z is not None:
+        np.save(ctx.output("linkage.npy"), Z)
+    average = _averager(ctx, project, c, cin)
+    summary, info_k, montage = [], {}, {}
+    for k, (res, st) in results.items():
+        tag = k_tag(k)
+        table = pd.DataFrame({PARTICLE_NAME: names, CLASS_COLUMN: res.labels})
+        if res.dist is not None:
+            table["py3staClassDist"] = np.round(res.dist, 5)
+        if res.prob is not None:
+            table["py3staClassProb"] = np.round(res.prob, 5)
+        write_star({"classes": table}, ctx.output_star(f"class_{cl.method}_{tag}.star"))
+        ids = np.arange(1, res.k + 1)
+        rows, vols = _class_averages(ctx, project, cin, res.labels, ids, average, f"_{tag}")
+        if st is not None:
+            for r in rows:
+                r["py3staClassJaccard"] = round(float(st.jaccard[r[CLASS_COLUMN] - 1]), 3)
+        write_star({"classes": pd.DataFrame(rows)}, ctx.output_star(f"classes_{tag}.star"))
+        montage[k] = (vols, [f"{r[CLASS_COLUMN]} ({r['py3staClassCount']})" for r in rows])
+        srow = {"py3staK": k, "py3staScore": round(res.score, 4), "py3staSmallestClass": int(res.counts.min())}
+        if st is not None:
+            srow.update(py3staARI=round(st.ari_mean, 3), py3staJaccardMin=round(float(np.nanmin(st.jaccard)), 3))
+        if res.bic is not None:
+            srow["py3staBIC"] = round(res.bic, 1)
+        summary.append(srow)
+        info_k[str(k)] = {"counts": res.counts.tolist(), **{key[6:].lower(): v for key, v in srow.items()
+                                                             if key in ("py3staARI", "py3staJaccardMin", "py3staBIC")}}
+        ctx.log(f"K={k}: counts {res.counts.tolist()}"
+                + (f", ARI {st.ari_mean:.2f}, weakest class Jaccard {np.nanmin(st.jaccard):.2f}" if st is not None else "")
+                + (f", BIC {res.bic:.0f}" if res.bic is not None else ""))
+    summary = pd.DataFrame(summary)
+    write_star({"summary": summary}, ctx.output_star("summary.star"))
+    ctx.info.update(k=list(results), factors=list(cl.factors), per_k=info_k)
+    if cl.bootstrap:
+        ctx.info["stable_k"] = [int(r.py3staK) for r in summary.itertuples() if r.py3staJaccardMin >= STABLE_JACCARD]
+    if "py3staBIC" in summary:
+        ctx.info["bic_k"] = int(summary.loc[summary["py3staBIC"].idxmin(), "py3staK"])
+        ctx.log(f"lowest BIC: K={ctx.info['bic_k']}")
+    if plots.available():
+        tag = f"cycle {n:03d}, {cl.method}"
+        plots.class_scatter(ctx.output("scatter.png"), X[:, :2] if X.shape[1] > 1 else np.column_stack([X[:, 0], X[:, 0]]),
+                            {k: r.labels for k, (r, _) in results.items()},
+                            tuple(f"PC{f}" for f in (cl.factors[:2] if len(cl.factors) > 1 else cl.factors * 2)),
+                            f"classes on the first two factors used: {tag}")
+        for k, (vols, labels) in montage.items():
+            plots.volume_views(ctx.output(f"classes_{k_tag(k)}.png"), vols, labels,
+                               title=f"class averages (projections), K = {k}: {tag}")
+        if cl.bootstrap or "py3staBIC" in summary:
+            plots.stability_summary(ctx.output("summary.png"), summary, f"per K: {tag}")
+        if Z is not None:
+            plots.dendrogram(ctx.output("dendrogram.png"), Z, cl.k, f"Ward tree: {tag}")
+    else:
+        ctx.warn("matplotlib not installed: no PNGs (pip install matplotlib)")
 
 
 # ------------------------------------------------------------------ select
 def select_params(p: ProjectConfig, c: CycleConfig) -> dict:
-    return {"select": dataclasses.asdict(c.select), "box": p.box, "apix": p.apix, "pose_source": _source_name("select")}
+    try:
+        used = classification_files(c)[0]
+    except ValueError:
+        used = None                                         # reported when select runs
+    return {"select": dataclasses.asdict(c.select), "classification": used, "box": p.box, "apix": p.apix,
+            "pose_source": _source_name("select")}
 
 
 def class_actions(ids, s) -> dict:
@@ -535,11 +668,13 @@ def run_select(ctx, project, n: int, c: CycleConfig) -> None:
     ctx.read_star(path)
     cin = load_cycle_input(project, n, path)
     cl_dir = cdir / get_step("classify").folder
-    cls_star = cl_dir / f"class_{c.classify.method}.star"
+    f_cls, f_classes, f_avg = classification_files(c)
+    cls_star = cl_dir / f_cls
     ctx.read_star(cls_star)
     assign = _particle_block(read_star(cls_star)).astype({PARTICLE_NAME: str}).set_index(PARTICLE_NAME)[CLASS_COLUMN]
-    classes = _particle_block(read_star(cl_dir / "classes.star"))
-    averages = np.array(read_mrc(cl_dir / "classes.mrcs", mmap=False)[0]).reshape(-1, p.box, p.box, p.box)
+    classes = _particle_block(read_star(cl_dir / f_classes))
+    averages = np.array(read_mrc(cl_dir / f_avg, mmap=False)[0]).reshape(-1, p.box, p.box, p.box)
+    ctx.log(f"classification: {f_cls}")
 
     names = cin.particles.df[PARTICLE_NAME].astype(str)
     missing = ~names.isin(assign.index)
@@ -613,7 +748,7 @@ def run_select(ctx, project, n: int, c: CycleConfig) -> None:
         out.loc[out.index[pos[excl]], EXCLUDED] = 1
         out.loc[out.index[pos[excl]], "py3staExcludedCycle"] = n
     write_star(blocks, ctx.output_star("selected.star"))
-    ctx.info.update(actions={str(k): v for k, v in actions.items()}, n_excluded_now=int(excl.sum()),
+    ctx.info.update(classification=f_cls, actions={str(k): v for k, v in actions.items()}, n_excluded_now=int(excl.sum()),
                     class_cc={str(k): v for k, v in cc_of.items()}, pose_source=src)
 
 

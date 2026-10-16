@@ -23,7 +23,7 @@ WEDGE_SIGNS = ("auto", 1, -1)
 REFERENCE_MODES = ("global", "file", "classes")
 MASK_SHAPES = ("sphere", "ellipsoid", "box", "file")
 STACK_DTYPES = ("float16", "float32")
-CLASSIFY_METHODS = ("column",)
+CLASSIFY_METHODS = ("column", "kmeans", "ward", "gmm")
 MSA_MODES = ("wmd", "plain")
 
 
@@ -166,8 +166,15 @@ class MSAConfig:
 
 @dataclass
 class ClassifyConfig:
-    method: str = "column"                      # column: classes from an integer STAR column (kmeans etc. later)
+    method: str = "kmeans"                      # kmeans | ward | gmm (on MSA factors) | column (an integer STAR column)
     column: str = "rlnClassNumber"              # method column; a missing column = one class
+    factors: typing.List[int] = field(default_factory=lambda: list(range(1, 9)))  # MSA factors used (i3 CLSFACT)
+    k: typing.List[int] = field(default_factory=lambda: [2, 3, 4, 6, 8])          # numbers of classes tried
+    use: typing.Optional[int] = None            # the K passed on to select (null: the only K in k)
+    standardize: bool = False                   # scale each factor to unit variance first
+    n_init: int = 10                            # kmeans / gmm restarts
+    bootstrap: int = 20                         # stability: re-clusterings of random 80 % subsets (0 = off)
+    seed: int = 0
 
 
 @dataclass
@@ -277,7 +284,19 @@ class CycleConfig:
             err.check(not uses_wedge or project.wedge.use, "msa.mode",
                       f"{ms.mode}{' + wedge' if ms.mode == 'plain' else ''} needs tilt information (wedge.use: true in "
                       "project.yaml); or use mode: plain with wedge: false")
-        err.choice(self.classify.method, CLASSIFY_METHODS, "classify.method")
+        cl = self.classify
+        err.choice(cl.method, CLASSIFY_METHODS, "classify.method")
+        if cl.method != "column":
+            err.check(ms.enable, "classify.method", f"{cl.method!r} classifies MSA factors: set msa.enable: true "
+                      "(or use method: column)")
+            err.check(bool(cl.factors) and len(set(cl.factors)) == len(cl.factors)
+                      and all(1 <= f <= ms.n_factors for f in cl.factors), "classify.factors",
+                      f"must be distinct factor numbers in 1..msa.n_factors ({ms.n_factors}) (got {cl.factors})")
+            err.check(bool(cl.k) and all(k >= 2 for k in cl.k) and len(set(cl.k)) == len(cl.k), "classify.k",
+                      f"must be distinct numbers of classes >= 2 (got {cl.k})")
+            err.check(cl.use is None or cl.use in cl.k, "classify.use", f"must be one of classify.k {cl.k} (got {cl.use})")
+            err.check(cl.n_init >= 1, "classify.n_init", f"must be >= 1 (got {cl.n_init})")
+            err.check(cl.bootstrap >= 0, "classify.bootstrap", f"must be >= 0 (got {cl.bootstrap})")
         sel = self.select
         err.check(sel.align == "all" or isinstance(sel.align, list), "select.align",
                   f"must be 'all' or a list of class numbers (got {sel.align!r})")
@@ -338,7 +357,8 @@ CYCLE_HEADER = """\
 #   mask: null = reference mask; min_gain: opt-in, keep a particle's pose unless the CC improves by >= min_gain
 # msa: mode wmd (wedge-masked differences: no missing-wedge factors) | plain (x - mean, i3; wedge: true filters
 #   each particle with its own wedge); mask: null = reference mask; bin, lowpass / highpass Å; n_factors
-# classify.method: column (classes from classify.column; missing column = one class)
+# classify.method: kmeans | ward | gmm on the MSA factors listed in classify.factors, one classification per K in
+#   classify.k; use: the K passed to select (null = the only K) | column (classes from classify.column)
 # select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
 #   target: reference (02_reference, reference 1) or an MRC path; lowpass / highpass / max_shift in Å, step in deg
 """

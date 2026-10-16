@@ -62,7 +62,8 @@ def two_state_proj(tmp_path):
                lambda c: (c["reference"]["mask"].update(radius=[66.0], soft=12.0),
                           c["select"].update(step=30.0, bin=1, lowpass=10.0, max_shift=24.0),
                           c["align"].update(enable=False),
-                          c["msa"].update(bin=2, lowpass=16.0, n_factors=6)))
+                          c["msa"].update(bin=2, lowpass=16.0, n_factors=6),
+                          c["classify"].update(factors=[1, 2, 3], k=[2, 3], bootstrap=4, n_init=4)))
     return load_project(p.root)
 
 
@@ -116,6 +117,9 @@ def test_msa_disabled_and_validation(two_state_proj):
     proj = two_state_proj
     cy = proj.cycle_dir(0) / "cycle.yaml"
     _edit_yaml(cy, lambda c: c["msa"].update(enable=False))
+    with pytest.raises(ConfigError, match="classifies MSA factors"):
+        load_project(proj.root).cycle_config(0)
+    _edit_yaml(cy, lambda c: c["classify"].update(method="column"))
     run_cycle(proj, 0, stop="msa")
     assert read_manifest(proj.cycle_dir(0) / "04_msa")["info"] == {"enabled": False}
     for upd, msg in (({"bin": 3}, "box 40 is not divisible by 3"), ({"lowpass": 12.0}, "beyond Nyquist"),
