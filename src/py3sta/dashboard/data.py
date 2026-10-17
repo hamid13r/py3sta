@@ -169,3 +169,90 @@ def thumbnail(path, project_views: bool = True) -> str:
 
 
 STEP_NAMES = [s.name for s in STEPS]
+
+
+# ------------------------------------------------------------------ maps
+MAP_SUFFIXES = (".mrc", ".mrcs", ".map")
+
+
+def cycle_maps(project, n: int) -> list[str]:
+    """Maps of a cycle (paths relative to the cycle folder), in step order."""
+    d = project.cycle_dir(n)
+    return sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.suffix in MAP_SUFFIXES and p.is_file())
+
+
+_VOL_CACHE: dict = {}
+
+
+def load_volumes(path, box: int | None = None) -> np.ndarray:
+    """(k, z, y, x) float32: one map, or a stack of k cubic maps stored as (k*box, box, box). Cached by mtime."""
+    from ..io.mrc import read_mrc
+
+    path = Path(path)
+    key = (str(path.resolve()), path.stat().st_mtime_ns)
+    if key not in _VOL_CACHE:
+        a = np.asarray(read_mrc(path, mmap=False)[0], np.float32)
+        if a.ndim == 4:
+            pass
+        elif a.ndim == 3 and a.shape[1] == a.shape[2] and a.shape[0] % a.shape[1] == 0 and a.shape[0] > a.shape[1]:
+            a = a.reshape(-1, a.shape[1], a.shape[1], a.shape[1])
+        elif a.ndim == 3:
+            a = a[None]
+        else:
+            raise ValueError(f"{path.name}: not a 3D map (shape {a.shape})")
+        if len(_VOL_CACHE) > 32:
+            _VOL_CACHE.clear()
+        _VOL_CACHE[key] = a
+    return _VOL_CACHE[key]
+
+
+def filtered(vol: np.ndarray, apix: float, lowpass: float | None = None) -> np.ndarray:
+    """Low-passed copy (Å) of a cubic map; unchanged if lowpass is None or beyond Nyquist."""
+    from ..reference import bandpass
+
+    if not lowpass or lowpass <= 2 * apix or len(set(vol.shape)) != 1:
+        return vol
+    return np.asarray(bandpass(vol, apix, lowpass=lowpass), np.float32)
+
+
+def ortho_views(vol: np.ndarray, indices=(None, None, None), project_views: bool = False) -> list[np.ndarray]:
+    """[XY, XZ, YZ] views: slices at ``indices`` (z, y, x; None = centre) or projections."""
+    return [view(vol, a, indices[a], project_views) for a in range(3)]
+
+
+def cycle_pngs(project, n: int) -> list[str]:
+    """Diagnostic PNGs of a cycle (relative to the cycle folder), in step order."""
+    d = project.cycle_dir(n)
+    return sorted(str(p.relative_to(d)) for p in d.rglob("*.png") if p.is_file())
+
+
+def all_fsc(project) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    return {n: c for n in project.cycles if (c := fsc_curve(project, n)) is not None}
+
+
+def star_table(path, block: str | None = None):
+    """A STAR block as a DataFrame (first block if ``block`` is None), or None if the file is missing."""
+    from ..io.star import read_star
+
+    path = Path(path)
+    if not path.is_file():
+        return None
+    blocks = read_star(path)
+    return blocks[block] if block else next(iter(blocks.values()))
+
+
+def scree(project, n: int):
+    return star_table(step_folder(project, n, "msa") / "scree.star")
+
+
+def classify_compare(project, n: int):
+    return star_table(step_folder(project, n, "classify") / "compare.star")
+
+
+def project_file(project, rel: str) -> Path:
+    """Path of a file inside the project folder; refuses paths that leave it."""
+    root = project.root.resolve()
+    p = (root / rel).resolve()
+    if root not in p.parents:
+        raise ValueError(f"{rel}: outside the project")
+    return p

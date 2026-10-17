@@ -1,3 +1,4 @@
+import json
 import socket
 import struct
 import zlib
@@ -130,15 +131,61 @@ def test_callbacks_over_http(proj):
     run_cycle(proj, 0, stop="average")
     c = create_app(proj.root).server.test_client()
 
-    def call(out, inputs):
-        oid, prop = out.split(".")
-        body = {"output": out, "outputs": {"id": oid, "property": prop}, "changedPropIds": [], "state": [],
-                "inputs": [{"id": i, "property": p, "value": v} for i, p, v in inputs]}
+    def call(out, inputs, state=()):
+        outs = [dict(zip(("id", "property"), o.split("."))) for o in out.split("...")]
+        body = {"output": f"..{out}.." if len(outs) > 1 else out, "outputs": outs if len(outs) > 1 else outs[0],
+                "changedPropIds": [],
+                "state": [{"id": i, "property": p, "value": v} for i, p, v in state], "inputs": [{"id": i, "property": p, "value": v} for i, p, v in inputs]}
         r = c.post("/_dash-update-component", json=body)
         assert r.status_code == 200, r.data[:500]
-        return r.get_data(as_text=True)
+        return json.dumps(r.get_json())
 
     assert "01_average" in call("overview.children", [("tick", "n_intervals", 1), ("tabs", "value", "cycles")])
     assert "averaging 40 particles" in call("log.children", [("log-cycle", "value", 0), ("log-step", "value", "average"),
                                                            ("tick", "n_intervals", 1)])
-    assert "cycle-000" in call("log-cycle.options", [("tick", "n_intervals", 1)])
+    assert "cycle-000" in call("log-cycle.options...map-cycle.options...plots-cycle.options", [("tick", "n_intervals", 1)])
+    assert "01_average/average.mrc" in call("map-file.options...map-file.value", [("map-cycle", "value", 0)],
+                                            [("map-file", "value", None)])
+    out = call("map-ortho.figure...map-gallery.figure...map-gallery.style",
+               [("map-cycle", "value", 0), ("map-file", "value", "01_average/average.mrc"), ("map-k", "value", 1),
+                ("map-mode", "value", "projections"), ("map-lowpass", "value", 30), ("map-mask", "value", []),
+                ("map-z", "value", 50), ("map-y", "value", 50), ("map-x", "value", 50)])
+    assert "heatmap" in out and "XY projection" in out
+    assert "half-map FSC" in call("plots.children", [("plots-cycle", "value", 0), ("tabs", "value", "plots")])
+
+
+def test_maps_and_plots(proj):
+    pytest.importorskip("dash")
+    from py3sta.dashboard.app import create_app, gallery_figure, map_figure, plots_page
+    from py3sta.io.mrc import write_mrc
+
+    run_cycle(proj, 0, stop="reference")
+    maps = data.cycle_maps(proj, 0)
+    assert {"01_average/average.mrc", "02_reference/mask.mrc", "02_reference/references.mrcs"} <= set(maps)
+    box, apix = proj.config.box, proj.config.apix
+    stack = np.random.default_rng(0).normal(size=(3 * box, box, box)).astype(np.float32)
+    stack[box + 3, 5, 7] = 100                                                   # volume 2, z=3, y=5, x=7
+    write_mrc(proj.cycle_dir(0) / "02_reference" / "test.mrcs", stack, apix)
+    vols = data.load_volumes(proj.cycle_dir(0) / "02_reference" / "test.mrcs")
+    assert vols.shape == (3, box, box, box) and vols[1, 3, 5, 7] == 100
+    f = map_figure(proj.root, 0, "02_reference/test.mrcs", 1, False, None, False,
+                   (100 * 3 / (box - 1), 100 * 5 / (box - 1), 100 * 7 / (box - 1)))
+    xy, xz, yz = (np.asarray(t.z) for t in f.data)
+    assert xy[5, 7] == 100 and xz[3, 7] == 100 and yz[3, 5] == 100            # slices through the voxel
+    assert "[2/3]" in f.layout.title.text
+    f = map_figure(proj.root, 0, "01_average/average.mrc", 0, True, 30.0, True)
+    assert len(f.data) == 6 and "low-pass 30 Å" in f.layout.title.text      # 3 projections + 3 mask contours
+    assert len(gallery_figure(proj.root, 0, "02_reference/test.mrcs").data) == 3
+    assert len(gallery_figure(proj.root, 0, "01_average/average.mrc").data) == 0    # one map: no gallery
+    lp = data.filtered(vols[1], apix, 4 * apix)
+    assert lp.std() < vols[1].std() and np.array_equal(data.filtered(vols[1], apix, apix), vols[1])   # beyond Nyquist: unchanged
+    page = str(plots_page(proj.root, 0))
+    assert "half-map FSC" in page
+    c = create_app(proj.root).server.test_client()
+    (proj.cycle_dir(0) / "01_average" / "x.png").write_bytes(data.png_bytes(np.zeros((2, 2), np.uint8)))
+    assert "cycle-000/01_average/x.png" in str(plots_page(proj.root, 0))
+    assert c.get("/files/cycle-000/01_average/x.png").status_code == 200
+    assert c.get("/files/cycle-000/01_average/average.mrc").status_code == 404
+    assert c.get("/files/cycle-000/%2E%2E/%2E%2E/x.png").status_code == 404
+    with pytest.raises(ValueError, match="outside the project"):
+        data.project_file(proj, "../x.png")
