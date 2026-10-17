@@ -156,3 +156,31 @@ def test_wedge_features_and_eta():
     raw, adj = np.array([(multiple_r(y, F, adjusted=False), multiple_r(y, F)) for y, F in
                          ((rng.normal(size=30), rng.normal(size=(30, 12))) for _ in range(200))]).T
     assert raw.mean() > 0.55 and np.median(adj) < 0.1                             # adjusted: ~0 at chance
+
+
+def test_whiten_wedge_recovers_states():
+    """Two states hidden under a stronger wedge-orientation component: kmeans splits by orientation on the raw
+    scores and by state after whitening."""
+    from scipy.spatial.transform import Rotation
+
+    from py3sta.cluster import ari, kmeans
+    from py3sta.msa import class_wedge_r, whiten_wedge
+
+    rng = np.random.default_rng(3)
+    n = 600
+    mats = Rotation.random(n, random_state=4).as_matrix()
+    F = wedge_features(mats)
+    state = rng.integers(0, 2, n)
+    g = (F - F.mean(0)) @ rng.normal(size=12)
+    g = 6 * g / g.std()                                                   # wedge part, 6x the state separation
+    X = np.column_stack([2.0 * state + g + rng.normal(scale=0.3, size=n),
+                         g + rng.normal(scale=0.3, size=n),
+                         rng.normal(size=n)])                             # pure noise column
+    raw = kmeans(X, 2, seed=0).labels
+    assert ari(raw, state) < 0.2 and class_wedge_r(raw, mats) > 0.5
+    Xw, removed = whiten_wedge(X, mats)
+    clean = kmeans(Xw, 2, seed=0).labels
+    assert ari(clean, state) > 0.95 and class_wedge_r(clean, mats) < 0.1
+    assert removed[0] > 0.8 and removed[1] > 0.95 and removed[2] < 0.05   # noise: ~12/n by chance
+    np.testing.assert_allclose(Xw.mean(0), X.mean(0), atol=1e-9)          # means kept
+    assert multiple_r(Xw[:, 1], F) == 0.0                                 # nothing linear left

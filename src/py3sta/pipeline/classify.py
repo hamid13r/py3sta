@@ -6,6 +6,7 @@ its own folder ``05_classify/<run>/``:
   class_<tag>.star       per particle: py3staClass (+ py3staClassDist / py3staClassProb); tag K004 or 'all'
   classes_<tag>.star     per class: count, fraction, FSC 0.143 resolution of its average, bootstrap Jaccard
   classes_<tag>.mrcs     class averages (from the stack, with the cycle's averaging settings; averages: true)
+  wedge.star             wedge: whiten — fraction of each factor's variance removed (py3staWedgeRemoved)
   summary.star           per classification: stability (ARI, weakest Jaccard), class/wedge r, class/tomogram V,
                          best class resolution, BIC (gmm), noise (hdbscan)
   embedding.npy          UMAP coordinates (space: umap); linkage.npy (ward); PNGs
@@ -161,7 +162,7 @@ def _compute_run(ctx, project, n: int, name: str, r: ClassifyRun, rdir, cin, pat
 
     from .. import cluster, plots
     from ..io.star import write_star
-    from ..msa import class_wedge_r
+    from ..msa import MIN_PER_WEDGE_FEATURE, class_wedge_r, whiten_wedge
     from .project import PARTICLE_NAME
 
     names = cin.particles.df[PARTICLE_NAME].astype(str).to_numpy()
@@ -170,6 +171,7 @@ def _compute_run(ctx, project, n: int, name: str, r: ClassifyRun, rdir, cin, pat
     Z = None
     view, view_axes = None, None
     class_names = {}
+    wedge_removed = np.nan                                # fraction of the factors' variance removed by whitening
     if r.method == "column":
         lab = _column_labels(ctx, cin, r.column, path)
         results = {"all": (cluster.ClusterResult(lab, int(len(np.unique(lab))), "column", 0.0), None)}
@@ -187,6 +189,17 @@ def _compute_run(ctx, project, n: int, name: str, r: ClassifyRun, rdir, cin, pat
                 + f"; not in a group: {int((lab == 0).sum())}")
     else:
         X = scores[[f"py3staPC{f}" for f in r.factors]].to_numpy(float)
+        if r.wedge == "whiten":
+            if len(X) < MIN_PER_WEDGE_FEATURE * 12:
+                ctx.warn(f"run {name}: wedge whitening with only {len(X)} particles (< {MIN_PER_WEDGE_FEATURE * 12}): "
+                         "the fit is noisy and may remove real signal (wedge: keep to compare)")
+            var = X.var(0)
+            X, removed = whiten_wedge(X, mats)
+            wedge_removed = float((removed * var).sum() / max(var.sum(), 1e-30))
+            write_star({"wedge": pd.DataFrame({"py3staFactor": list(r.factors),
+                                               "py3staWedgeRemoved": np.round(removed, 4)})}, rdir / "wedge.star")
+            ctx.log(f"run {name}: wedge whitening removed {100 * wedge_removed:.1f} % of the factors' variance "
+                    "(per factor: " + ", ".join(f"{f} {100 * v:.0f} %" for f, v in zip(r.factors, removed)) + ")")
         if r.standardize:
             X = X / np.where(X.std(0) > 0, X.std(0), 1)
         Y = X
@@ -243,6 +256,7 @@ def _compute_run(ctx, project, n: int, name: str, r: ClassifyRun, rdir, cin, pat
                 "py3staSmallestClass": int(min(row["py3staClassCount"] for row in rows if row[CLASS_COLUMN] > 0))
                 if n_classes else 0,
                 "py3staScore": round(float(res.score), 4), "py3staWedgeR": round(wedge_r, 3),
+                "py3staWedgeRemoved": round(wedge_removed, 4) if np.isfinite(wedge_removed) else np.nan,
                 "py3staTomoV": round(cluster.cramers_v(res.labels, tomos), 3),
                 "py3staBestRes": min(res_vals) if res_vals else np.nan,
                 "py3staARI": round(st.ari_mean, 3) if st is not None else np.nan,
@@ -313,8 +327,10 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
                 raise ValueError(f"run {name}: msa.star has no factor(s) {missing} (msa computed fewer factors)")
             bad = sorted(set(r.factors) & flagged)
             if bad:
-                ctx.warn(f"run {name}: factors {bad} were flagged by msa as following the missing wedge: classes may "
-                         "sort particles by orientation (drop them from factors)")
+                ctx.warn(f"run {name}: factors {bad} were flagged by msa as following the missing wedge: "
+                         + ("whitened (their linear wedge part is removed); check the classes' WedgeR"
+                            if r.wedge == "whiten" else
+                            "classes may sort particles by orientation (wedge: whiten, or drop them from factors)"))
     device, label = resolve_device(p.compute)
     average = None
     folder = ctx.folder
@@ -350,7 +366,8 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
         for s in rec["summary"]:
             rows.append({"py3staRun": name, "py3staMethod": r.method,
                          "py3staSpace": r.method if r.method in NO_MSA else r.space,
-                         "py3staFactors": "" if r.method in NO_MSA else ",".join(map(str, r.factors)), **s})
+                         "py3staFactors": "" if r.method in NO_MSA else ",".join(map(str, r.factors)),
+                         "py3staWedge": "" if r.method in NO_MSA else r.wedge, **s})
             cs = _particle_block(read_star(folder / name / f"class_{s['py3staTag']}.star"))
             lab = cs.set_index(cs[PARTICLE_NAME].astype(str))[CLASS_COLUMN]
             labels[f"{name}/{s['py3staTag']}"] = lab.loc[names].to_numpy()
@@ -371,7 +388,7 @@ def run_classify(ctx, project, n: int, c: CycleConfig) -> None:
                     classifications={f"{r_['py3staRun']}/{r_['py3staTag']}": {
                         k[6:].lower(): (None if isinstance(v, float) and not np.isfinite(v) else v)
                         for k, v in r_.items() if k in ("py3staK", "py3staARI", "py3staJaccardMin", "py3staWedgeR",
-                                                       "py3staTomoV", "py3staBestRes", "py3staBIC", "py3staNoise")}
+                                                       "py3staWedgeRemoved", "py3staTomoV", "py3staBestRes", "py3staBIC", "py3staNoise")}
                         for r_ in rows})
     ctx.log(f"{len(keys)} classification(s) from {len(runs)} run(s) ({len(cached)} cached); compare.star"
             + (f"; select uses {use}" if use else "; set classify.use to choose the one passed to select"))

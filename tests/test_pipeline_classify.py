@@ -145,5 +145,23 @@ def test_warns_on_wedge_factors(two_state_proj):
     _edit_yaml(proj.cycle_dir(0) / "cycle.yaml",
                lambda c: (c["msa"].update(mode="plain", wedge=False), c["classify"].update(bootstrap=0, k=[2])))
     run_cycle(proj, 0, stop="classify")
-    w = read_manifest(proj.cycle_dir(0) / "05_classify")["warnings"]
-    assert any("flagged by msa as following the missing wedge" in x for x in w), w
+    out = proj.cycle_dir(0) / "05_classify"
+    w = read_manifest(out)["warnings"]
+    assert any("flagged by msa as following the missing wedge: whitened" in x for x in w), w   # default: whiten
+    run = read_manifest(out)["info"]["runs"][0]
+    removed = read_star(out / run / "wedge.star")["wedge"]
+    assert removed["py3staFactor"].tolist() == [1, 2, 3]
+    assert ((removed["py3staWedgeRemoved"] >= 0) & (removed["py3staWedgeRemoved"] <= 1)).all()
+    cmp_ = read_star(out / "compare.star")["compare"]
+    assert cmp_["py3staWedge"].tolist() == ["whiten"] and 0 < cmp_["py3staWedgeRemoved"].iloc[0] < 1
+    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["classify"].update(wedge="keep"))
+    proj = load_project(proj.root)
+    assert step_state(proj, 0, "classify").state == "stale"
+    run_cycle(proj, 0, start="classify", stop="classify")
+    w = read_manifest(out)["warnings"]
+    assert any("classes may sort particles by orientation (wedge: whiten" in x for x in w), w
+    assert not (out / run / "wedge.star").exists()
+    assert read_star(out / "compare.star")["compare"]["py3staWedge"].tolist() == ["keep"]
+    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["classify"].update(wedge="drop"))
+    with pytest.raises(ConfigError, match="classify.wedge"):
+        load_project(proj.root).cycle_config(0)

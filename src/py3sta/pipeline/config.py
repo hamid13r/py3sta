@@ -26,6 +26,7 @@ STACK_DTYPES = ("float16", "float32")
 CLASSIFY_METHODS = ("kmeans", "ward", "gmm", "hdbscan", "column", "groups")
 EMBED_METHODS = ("umap", "tsne", "pca")
 CLASSIFY_SPACES = ("pca", "umap")
+WEDGE_MODES = ("whiten", "keep")                    # = msa.WEDGE_MODES (config does not import numpy modules)
 RUN_NAME_RE = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 MSA_MODES = ("wmd", "plain")
 
@@ -172,6 +173,7 @@ class EmbedConfig:
     enable: bool = True                         # skipped when msa is disabled
     method: str = "umap"                        # umap | tsne | pca (two factors as they are)
     factors: typing.List[int] = field(default_factory=lambda: list(range(1, 9)))
+    wedge: str = "whiten"                       # whiten: remove the wedge-orientation part of the factors | keep
     standardize: bool = False
     n_neighbors: int = 30                       # umap
     min_dist: float = 0.1                       # umap
@@ -200,7 +202,9 @@ class ClassifyRun:
     umap: UmapConfig = field(default_factory=UmapConfig)
     min_cluster_size: int = 50                  # hdbscan
     min_samples: typing.Optional[int] = None    # hdbscan (null = min_cluster_size)
-    standardize: bool = False                   # scale each factor to unit variance first
+    wedge: str = "whiten"                       # whiten: remove from the factor scores the part the missing-wedge
+                                                # orientation predicts (linear fit) | keep
+    standardize: bool = False                   # scale each factor to unit variance first (after whitening)
     n_init: int = 10                            # kmeans / gmm restarts
     bootstrap: int = 20                         # stability: re-clusterings of random 80 % subsets (0 = off)
     seed: int = 0
@@ -457,6 +461,7 @@ class CycleConfig:
             if r.method in ("column", "groups"):
                 continue
             err.choice(r.space, CLASSIFY_SPACES, f"{key}.space")
+            err.choice(r.wedge, WEDGE_MODES, f"{key}.wedge")
             err.check(ms.enable, f"{key}.method", f"{r.method!r} classifies MSA factors: set msa.enable: true "
                       "(or use method: column)")
             err.check(bool(r.factors) and len(set(r.factors)) == len(r.factors)
@@ -478,6 +483,7 @@ class CycleConfig:
                 err.check(u.n_components >= 1, f"{key}.umap.n_components", f"must be >= 1 (got {u.n_components})")
         e = self.embed
         err.choice(e.method, EMBED_METHODS, "embed.method")
+        err.choice(e.wedge, WEDGE_MODES, "embed.wedge")
         if e.enable and ms.enable:
             err.check(bool(e.factors) and len(set(e.factors)) == len(e.factors)
                       and all(1 <= f <= ms.n_factors for f in e.factors)
@@ -554,14 +560,17 @@ CYCLE_HEADER = """\
 # align: levels [[nut, nstep, spin, sstep], ...] coarse to fine around the current pose (deg); max_shift Å per axis
 #   or [x, y, z] along the tomogram axes (<= stack.margin - 2 voxels; z is the noisiest: missing wedge);
 #   mask: null = reference mask; min_gain: opt-in, keep a particle's pose unless the CC improves by >= min_gain
-# msa: mode wmd (wedge-masked differences: no missing-wedge factors) | plain (x - mean, i3; wedge: true filters
+# msa: mode wmd (wedge-masked differences: fewer missing-wedge factors) | plain (x - mean, i3; wedge: true filters
 #   each particle with its own wedge); mask: null = reference mask; bin, lowpass / highpass Å; n_factors
 # classify: method kmeans | ward | gmm | hdbscan (on the MSA factors in classify.factors; space pca or umap) | column
 #   (classes from classify.column); one classification per K in classify.k. These fields are the defaults of every
 #   run; classify.runs: {name: {settings}} tries several (each recomputed only when its settings change; see
 #   05_classify/compare.star). use: the classification passed to select: run/K004 | run (one classification) | K
 #   method groups: lasso groups drawn in 'py3sta explore' (file: groups/NAME.json); class 0 = not in any group
-# embed: 2D map of the MSA factors for 'py3sta explore': method umap | tsne | pca (the first two factors listed)
+#   wedge: whiten (default) removes from the factor scores what the missing-wedge orientation predicts (linear fit)
+#   | keep; factors msa flags as wedge factors and classes that follow the wedge (WedgeR) are only warned about
+# embed: 2D map of the MSA factors for 'py3sta explore': method umap | tsne | pca (the first two factors listed);
+#   wedge: whiten | keep as in classify
 # select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
 #   target: reference (02_reference, reference 1) | each | an MRC path; each: the align classes are aligned to an
 #   anchor class (anchor: class number, null = best SNR = best class resolution, then the largest class) whose

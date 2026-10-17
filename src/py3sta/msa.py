@@ -363,6 +363,34 @@ def wedge_features(mats) -> np.ndarray:
     return np.concatenate(out, 1)
 
 
+WEDGE_MODES = ("whiten", "keep")
+
+
+def whiten_wedge(X, mats) -> tuple[np.ndarray, np.ndarray]:
+    """Remove from each column of X (factor scores) the part the wedge orientation predicts linearly:
+    least squares on the wedge features (with an intercept), subtract the fitted wedge part (the mean is kept).
+    A column is only changed if its fit is above chance (adjusted R^2 > 0): with p = 12 features a fit explains
+    ~p/n of any column by chance, which would otherwise remove real signal when there are few particles.
+    Returns (whitened X, fraction of each column's variance removed). Non-linear wedge dependence remains:
+    check the classes with ``class_wedge_r``."""
+    X = np.asarray(X, float)
+    F = wedge_features(mats)
+    F = F - F.mean(0)
+    n, p = len(X), np.linalg.matrix_rank(np.column_stack([np.ones(len(F)), F])) - 1
+    coef = np.linalg.lstsq(np.column_stack([np.ones(n), F]), X, rcond=None)[0]
+    pred = F @ coef[1:]
+    var = X.var(0)
+    r2 = np.where(var > 0, pred.var(0) / np.where(var > 0, var, 1), 0.0)
+    adj = 1 - (1 - r2) * (n - 1) / max(n - p - 1, 1)
+    keep = (adj <= 0) | (n - p - 1 <= 0)
+    pred[:, keep] = 0
+    r2[keep] = 0
+    return X - pred, r2
+
+
+MIN_PER_WEDGE_FEATURE = 20                                 # particles per wedge feature for a reliable whitening
+
+
 def _adjusted(r2: float, n: int, p: int) -> float:
     """sqrt of the adjusted R^2 (chance level ~0 for any n, p): 1 - (1 - R^2) (n - 1) / (n - p - 1)."""
     if n - p - 1 <= 0:

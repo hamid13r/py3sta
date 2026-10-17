@@ -63,23 +63,37 @@ def run_embed(ctx, project, n: int, c: CycleConfig) -> None:
     if missing:
         raise ValueError(f"{msa_star.name} has no {', '.join(missing)} (msa computed fewer factors)")
     X = sc[cols].to_numpy(float)
+    names = sc[PARTICLE_NAME].astype(str).to_numpy()
+    path, _ = pose_star(project, n, "embed")
+    path = path if path.is_file() else project.cycle_input(n)
+    ctx.read_star(path)                                    # poses -> wedge orientation
+    df = load_cycle_input(project, n, path).particles
+    pos = pd.Series(np.arange(len(df.df)), index=df.df[PARTICLE_NAME].astype(str)).loc[names].to_numpy()
+    removed = None
+    if e.wedge == "whiten":
+        from ..msa import MIN_PER_WEDGE_FEATURE, whiten_wedge
+
+        if len(X) < MIN_PER_WEDGE_FEATURE * 12:
+            ctx.warn(f"wedge whitening with only {len(X)} particles (< {MIN_PER_WEDGE_FEATURE * 12}): the fit is noisy "
+                     "and may remove real signal (embed.wedge: keep to compare)")
+        var = X.var(0)
+        X, per = whiten_wedge(X, df.matrices[pos])
+        removed = float((per * var).sum() / max(var.sum(), 1e-30))
+        ctx.log(f"wedge whitening removed {100 * removed:.1f} % of the factors' variance")
     if e.standardize:
         X = X / np.where(X.std(0) > 0, X.std(0), 1)
     ctx.log(f"{e.method} of {len(X)} particles on factors {e.factors}")
     E = embed(X, e.method, e.n_neighbors, e.min_dist, e.perplexity, e.seed)
-    names = sc[PARTICLE_NAME].astype(str).to_numpy()
     table = pd.DataFrame({PARTICLE_NAME: names, "py3staEmbed1": np.round(E[:, 0], 5),
                           "py3staEmbed2": np.round(E[:, 1], 5)})
     write_star({"particles": table}, ctx.output_star(EMBED_FILE))
     if plots.available():
-        path, _ = pose_star(project, n, "embed")
-        path = path if path.is_file() else project.cycle_input(n)
-        df = load_cycle_input(project, n, path).particles.df.astype({PARTICLE_NAME: str}).set_index(PARTICLE_NAME)
-        df = df.loc[names]
+        df = df.df.iloc[pos]
         colours = {"tomogram": ("cat", df["rlnTomoName"].to_numpy()),
                    f"PC{e.factors[0]}": ("num", X[:, 0])}
         if "py3staRefCC" in df:
             colours["alignment CC"] = ("num", df["py3staRefCC"].to_numpy(float))
         axes = ("PC%d" % e.factors[0], "PC%d" % e.factors[1]) if e.method == "pca" else (f"{e.method}1", f"{e.method}2")
         plots.embedding_panels(ctx.output("embedding.png"), E, colours, axes, f"cycle {n:03d}: {e.method} of factors {e.factors}")
-    ctx.info.update(enabled=True, method=e.method, factors=list(e.factors), n_particles=len(X))
+    ctx.info.update(enabled=True, method=e.method, factors=list(e.factors), n_particles=len(X), wedge=e.wedge,
+                    wedge_removed=removed)
