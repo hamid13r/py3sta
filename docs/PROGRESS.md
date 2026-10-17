@@ -33,8 +33,12 @@ lasso groups), groups as a classify run. Parked by the user: automatic exclusion
 **Phase 5 — select + full cycle** (2026-10-16, see below): `select.target: each` (anchor = best-SNR class or
 `select.anchor`) ✅; full MIM019 cycle 0 → 1 run end to end ✅. Acceptance mixed: with all classes aligned
 cycle 1 is 0.5 Å worse (16.8 vs 16.3 Å) — the loss is 03_align from RELION's poses (same as Phase 2 part 3),
-select is ~identity; excluding the 35 Å class keeps 16.3 Å with 60 % of the particles. Next: decide how to
-handle alignment from already-refined poses (see "Open").
+select is ~identity; excluding the 35 Å class keeps 16.3 Å with 60 % of the particles. Still open: how to
+handle alignment from already-refined poses (see "Open" in the Phase 5 section).
+
+**Phase 6 — dashboard** (started 2026-10-16, see below; user: Dash, shared workstation → token). v1 read-only ✅:
+`py3sta dashboard` (cycles overview, Maps, Plots, Logs, ChimeraX). Next: v2 (job queue, cycle.yaml form, select
+page, explore + live lasso averages, particles / flags).
 
 **Phase 2 — particle alignment (MRA)**, in three parts:
 1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
@@ -90,6 +94,41 @@ exactly (ARI 1.0) and go through select → final.
   and warns when `classify.factors` include factors msa flagged.
 - gmm BIC decreases monotonically up to K = 8 (no minimum): continuous variability, BIC not a K selector here.
 - Timing of classify (6081 × 8): kmeans 2.7 s (GPU, 5 K + 10 bootstraps each), ward 24 s, gmm 24 s.
+
+## Phase 6 v1 — read-only dashboard (2026-10-16)
+
+User decisions: Dash (default of PLAN §4); shared workstation → access token, one job queue per project (v2).
+`pip install 'py3sta[dashboard]'` (dash 2.18.2 + plotly; installed into `tomo_toolshed`).
+
+- `py3sta dashboard PROJECT [--port 8050] [--host 127.0.0.1] [--token T | --no-token]`: listens on 127.0.0.1 by
+  default (SSH tunnel from a laptop; the command prints the `ssh -L` line); a random token is printed in the
+  URL; requests without it get 403, the first `?token=` sets an httponly SameSite cookie. Refuses a busy port.
+- `dashboard/data.py` reads everything through the pipeline API (project_status, manifests, STAR/MRC); no Dash
+  imports, unit-tested. `dashboard/app.py` renders; render functions are plain and tested directly, callbacks
+  also through Dash's HTTP endpoint.
+- Pages: **Cycles** (one row per cycle: particles, excluded, ctf, FSC 0.143 first/last crossing, projections
+  thumbnail of the average as an inline PNG — a 20-line zlib encoder, no imaging library — and a coloured badge
+  per step with the stale reasons / time / device / warnings as tooltip; resolution-per-cycle plot; refreshes
+  every 10 s so CLI runs show up), **Maps** (any map of a cycle: XY/XZ/YZ slices with position sliders or
+  projections, low-pass in Å, reference-mask contour, volume slider + gallery for stacks; volumes are read
+  server-side and cached by mtime, only 2D views are sent), **Plots** (half-map FSC of every cycle, scree,
+  sortable `compare.star` table, every step PNG of the cycle — served by `/files/...png`, PNG only and inside
+  the project), **Logs** (log.txt, warnings, error + traceback of any step).
+- `run_step` now writes `log.txt` in each step folder (time-stamped, flushed per line so it can be followed
+  while running; on failure the error and traceback are appended). Steps run before this have no log.txt.
+- ChimeraX (`chimerax.py`, button in Maps, `py3sta chimerax MAP...`): REST remote control
+  (`remotecontrol rest start port 60000` in ChimeraX). Checked against ChimeraX 1.10.1 headless: `json true`
+  replies to `open` with "'Volume' object has no attribute 'string'" although the map opened — treated as
+  success; stacks (`.mrcs`) open as one tall map, so they are split into one model per volume (`volume copy
+  subregion`, origins side by side along x, renamed `file [i]`; `tile` fails headless). MIM019: average,
+  21 eigenvolumes, 3 aligned classes opened (25 models). ChimeraX must see the files (same machine or
+  shared filesystem; reverse tunnel for the port).
+- MIM019 (`data/mim019_cycle`): overview 0.7 s (6081 particles, two cycles), slices 0.1 s, 21-volume gallery
+  0.1 s, plots page 0.14 s. Not yet looked at in a real browser (no browser here) — callbacks checked over HTTP.
+- Tests: PNG round trip, views, log.txt (success + failure), overview states / stale reason / FSC / thumbnail,
+  token 403/200/cookie, busy port, maps (slice through a known voxel in all three views, stack index, mask
+  contours, gallery), PNG route (no MRC, no `..`), callbacks over HTTP, ChimeraX against a fake REST server
+  with the captured replies (incl. the encoding error), not running, dashboard button.
 
 ## Phase 5 — `select.target: each`, full MIM019 cycle (2026-10-16, RTX A5000)
 

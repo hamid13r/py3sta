@@ -225,7 +225,7 @@ tunnel (`ssh -L 8050:localhost:8050 workstation`).
 
 **Phasing**
 - v0 (with Phase 4): stand-alone explorer HTML (lasso → groups.json).
-- v1 (Phase 6): read-only dashboard — cycles overview, viewers, FSC, logs.
+- v1 (Phase 6) ✅ 2026-10-16: read-only dashboard — cycles overview, viewers, FSC, logs, ChimeraX.
 - v2 (Phase 6): run/edit — job queue, parameter forms, select page, flag management, live lasso averages.
 
 ## 5. Phases and acceptance checks
@@ -244,4 +244,4 @@ tunnel (`ssh -L 8050:localhost:8050 workstation`).
 ## 6. Open questions (ask the user)
 
 - ~~Reference for class-average alignment when `each`~~ — decided 2026-10-16: best-SNR class (`select.anchor` overrides).
-- Dashboard framework: Dash (default) vs FastAPI + custom JS; multi-user needs on shared workstations?
+- ~~Dashboard framework~~ — decided 2026-10-16: Dash; shared workstation (access token, one job queue per project).

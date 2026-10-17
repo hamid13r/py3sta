@@ -28,7 +28,7 @@ src/py3sta/
   align.py           map-to-map alignment: resample, SO(3) grid, masked CC over shifts (numpy + torch), polish, mirror
   reference.py       masks (sphere/ellipsoid/box/file, soft edges in Å), band-pass, fit_box, prepare_reference
   stack.py           project particle stack: unrotated float16 crops, refresh_stack (new / tomogram changed / drift)
-  cli.py             click CLI: init run status next flag variance explore stack align-maps pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
+  cli.py             click CLI: init run status next flag variance explore dashboard chimerax stack align-maps pos2star trf2star star2trf star2warp average add-xml ctf-check wedge-check
   io/                star.py (dependency-free STAR), mrc.py (numpy MRC), trf.py (i3), dipole.py (.pos picks),
                      particles.py (ParticleSet = RELION-4 particle table + tomo_key naming)
   pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks, next_cycle), flags.py (flag), variance.py (py3sta variance),
@@ -36,8 +36,11 @@ src/py3sta/
                      01_average, 02_reference, 03_align, 04_msa, 07_select, 08_final), classify.py (05_classify:
                      named runs, per-run cache, comparison; method groups = lasso groups), embed.py (06_embed),
                      explore.py (py3sta explore: offline HTML, lasso groups file), runner.py (run_cycle, status)
+  chimerax.py        open maps in a running ChimeraX (REST remote control); stacks -> one model per volume
+  dashboard/         py3sta dashboard (Dash): data.py reads the project through the pipeline API (no Dash),
+                     app.py renders pages (cycles, maps, plots, logs) + access token
   utils/             stand-alone utilities (each also `python -m py3sta.utils.<name>`), e.g. add_warp_xml
-tests/               pytest; scipy/torch/umap tests auto-skip when not installed; explore_harness.js runs the
+tests/               pytest; scipy/torch/umap/dash tests auto-skip when not installed; explore_harness.js runs the
                      explore page's script on a stub DOM in node (simulated lasso + export)
 scripts/check_torch.py   GPU vs numpy parity + timing on real data
 data/                local test data and results — git-ignored, never commit (tomograms are GBs)
