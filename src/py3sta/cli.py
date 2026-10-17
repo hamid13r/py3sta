@@ -349,6 +349,21 @@ def dashboard(project_dir, host, port, token, no_token, debug):
     serve(root, host, port, token, debug)
 
 
+@main.command()
+@click.argument("maps", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--port", default=60000, show_default=True, type=int,
+              help="ChimeraX REST port (in ChimeraX: remotecontrol rest start port 60000).")
+@click.option("--host", default="127.0.0.1", show_default=True)
+def chimerax(maps, port, host):
+    """Open MAPS in a running ChimeraX; stacks (.mrcs) become one model per volume."""
+    from .chimerax import ChimeraXError, open_maps
+
+    try:
+        click.echo(open_maps(maps, port, host))
+    except ChimeraXError as e:
+        raise click.ClickException(str(e))
+
+
 @main.command("next")
 @click.argument("project_dir")
 @click.argument("cycle")

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..chimerax import DEFAULT_PORT as DEFAULT_CX_PORT
 from . import data
 
 REFRESH_MS = 10_000
@@ -176,6 +177,20 @@ def gallery_figure(root, n, rel, project_views=True, lowpass=None, axis=0, cols=
     return fig
 
 
+def chimerax_open(root, n, rel, port=None) -> str:
+    """Open the map in a running ChimeraX (REST remote control); returns a status line."""
+    from ..chimerax import ChimeraXError, open_maps
+
+    if n is None or not rel:
+        return "choose a map first"
+    try:
+        log = open_maps([_load(root).cycle_dir(int(n)) / rel], int(port or DEFAULT_CX_PORT))
+    except ChimeraXError as e:
+        return f"ChimeraX: {e}"
+    lines = [ln for ln in log.splitlines() if ln.strip()]
+    return " · ".join(dict.fromkeys([lines[0], lines[-1]])) if lines else "sent to ChimeraX"
+
+
 def plots_page(root, n):
     """FSC of every cycle, scree, classification comparison, and the step PNGs of cycle n."""
     import plotly.graph_objects as go
@@ -262,7 +277,12 @@ def create_app(root, token: str | None = None):
                           dcc.Input(id="map-lowpass", type="number", placeholder="low-pass Å", debounce=True,
                                     min=0, style={"width": "110px"}),
                           dcc.Checklist(id="map-mask", options=[{"label": "mask", "value": "mask"}], value=[],
-                                        inline=True)],
+                                        inline=True),
+                          html.Button("open in ChimeraX", id="cx-open",
+                                      title="needs ChimeraX on this machine with: remotecontrol rest start port PORT"),
+                          html.Span(dcc.Input(id="cx-port", type="number", value=DEFAULT_CX_PORT, min=1, max=65535,
+                                              style={"width": "80px"}), title="ChimeraX REST port"),
+                          html.Span(id="cx-status", style={"font-size": "13px", "color": "#555"})],
                          style={"display": "flex", "gap": "12px", "margin": "12px 0", "flex-wrap": "wrap",
                                 "align-items": "center"}),
                 html.Div([html.Span("volume"), dcc.Slider(id="map-k", min=1, max=1, step=1, value=1)],
@@ -331,6 +351,11 @@ def create_app(root, token: str | None = None):
     @app.callback(Output("plots", "children"), Input("plots-cycle", "value"), Input("tabs", "value"))
     def _plots(n, tab):
         return plots_page(root, n) if tab == "plots" else []
+
+    @app.callback(Output("cx-status", "children"), Input("cx-open", "n_clicks"), State("map-cycle", "value"),
+                  State("map-file", "value"), State("cx-port", "value"), prevent_initial_call=True)
+    def _chimerax(_c, n, rel, port):
+        return chimerax_open(root, n, rel, port)
 
     @server.route("/files/<path:rel>")
     def _file(rel):
