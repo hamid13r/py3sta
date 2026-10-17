@@ -33,8 +33,9 @@ lasso groups), groups as a classify run. Wedge factors: whitening per run (defau
 **Phase 5 — select + full cycle** (2026-10-16, see below): `select.target: each` (anchor = best-SNR class or
 `select.anchor`) ✅; full MIM019 cycle 0 → 1 run end to end ✅. Acceptance mixed: with all classes aligned
 cycle 1 is 0.5 Å worse (16.8 vs 16.3 Å) — the loss is 03_align from RELION's poses (same as Phase 2 part 3),
-select is ~identity; excluding the 35 Å class keeps 16.3 Å with 60 % of the particles. Still open: how to
-handle alignment from already-refined poses (see "Open" in the Phase 5 section).
+select is ~identity; excluding the 35 Å class keeps 16.3 Å with 60 % of the particles. Open, and now the main
+issue: py3sta's alignment (bin 2, 30 Å) degrades RELION's poses at 15–25 Å (template FSC 0.83 → 0.64 at 19 Å;
+see "Gold standard" below). `gold_standard: true` ✅ (2026-10-17). novaCTF vs Warp and `ctf: amplitude` checked.
 
 **Phase 6 — dashboard** (started 2026-10-16, see below; user: Dash, shared workstation → token). v1 read-only ✅:
 `py3sta dashboard` (cycles overview, Maps, Plots, Logs, ChimeraX). v2 (job queue, cycle.yaml form, select
@@ -154,6 +155,45 @@ full cycle 0 → `next` → cycle-1 average. nova needed its own stack (1010 s f
   while self-consistency stays — mild overfitting to its own reference, not seen in novaCTF. Caveat: one
   template (RSTM `template.mrc`); a gold-standard check (independent half-set refinement) or a second
   reference would confirm. No gain in the half-map resolution at this box/pixel size (6.65 Å, Nyquist 13.3 Å).
+
+## Gold standard (`gold_standard: true`) and the MIM019 check (2026-10-17, RTX A5000)
+
+`gold_standard: true` (cycle.yaml): the half sets (rlnRandomSubset 1 / 2) never meet. `02_reference` writes
+`references_half{1,2}.mrcs` (the half averages, same mask / band-pass; file references: the same files for both,
+warned without a low-pass); `03_align` aligns each half set to its own half reference; `07_select` averages every
+class per half set and aligns it to that half's target (reference half, the anchor class's half average for
+`each`, or the MRC), transforms per (class, half) in `transforms.star` (`py3staHalf`), `classes_aligned_half{k}`.
+Classification stays on all particles (labels do not move particles). The step parameters only carry
+`gold_standard` when it is on, so projects from before stay done. Tests: half set 2 (4 of 16 particles) with a
+common 9° error — gold standard leaves it at its own pose (< 2°), plain alignment pulls it towards the
+half-1-dominated reference (3.4°); select per half restores a perturbed class for target MRC and each (4-particle
+half-class averages: ≤ 1.4°); validation (needs average.halves, both half sets); toggling → reference stale.
+
+MIM019 (`novactf_test/gold_{warp,nova}`): from the **original RELION poses** (`mim019_cycle/input.star`,
+rlnRandomSubset 2980 / 3101), Warp `ctf: none`, novaCTF `ctf: amplitude`, gold standard, cycles 0–3 + cycle-4
+average (~10 min per cycle). CC between the half references 0.995 (Warp) / 0.984 (novaCTF) every cycle.
+
+| run, cycle average | FSC 0.143 | half-map FSC 34/30/25/22/19/17/15 Å | template FSC same shells | align of that cycle |
+|---|---|---|---|---|
+| Warp c0 (RELION poses) | **16.3 Å** | 0.70 0.73 0.51 0.28 0.20 0.17 0.14 | 0.96 0.98 **0.95 0.87 0.83 0.77 0.67** | 2.0°, 3.3 Å |
+| Warp c1 | 16.9 Å | 0.72 0.73 0.48 0.27 0.18 0.16 0.13 | 0.95 0.95 0.88 0.75 0.65 0.54 0.48 | 0.0°, 0.5 Å |
+| Warp c4 | 16.9 Å | 0.71 0.73 0.46 0.27 0.17 0.15 0.13 | 0.95 0.95 0.88 0.73 0.64 0.52 0.46 | — |
+| novaCTF c0 (RELION poses) | 18.6 Å | 0.73 0.69 0.51 0.20 0.17 0.06 0.04 | 0.98 0.97 0.95 0.82 0.79 0.68 0.53 | 1.7°, 4.2 Å |
+| novaCTF c1 | 17.8 Å | 0.76 0.72 0.56 0.28 0.22 0.09 0.06 | 0.98 0.96 0.93 0.78 0.74 0.59 0.46 | 0.5°, 0.7 Å |
+| novaCTF c4 | 18.0 Å | 0.75 0.72 0.55 0.26 0.22 0.09 0.07 | 0.97 0.95 0.92 0.76 0.71 0.57 0.44 | — |
+
+- Gold standard changes nothing measurable at this resolution: the converged values equal the shared-reference
+  runs (Warp 16.9 Å, template 0.64 vs 0.63 at 19 Å; novaCTF 18.0 Å) — the earlier half-map FSCs were not
+  inflated by overfitting.
+- novaCTF vs Warp, now with independent halves: the same picture — Warp better half-map FSC (16.9 vs 18.0 Å),
+  novaCTF + amplitude better template FSC at 25–17 Å (0.92 / 0.76 / 0.72 / 0.57 vs 0.88 / 0.73 / 0.64 / 0.52).
+- **The main finding: py3sta's alignment degrades RELION's poses.** The RELION poses on the Warp tomograms give
+  the best map of every run (16.3 Å; template FSC 0.83 at 19 Å, 0.77 at 17 Å); one py3sta alignment cycle drops
+  that to 0.65 / 0.54 and it never recovers (gold standard or not, novaCTF or Warp). This is the 0.5 Å loss of
+  Phase 2 part 3 / Phase 5, but the template FSC shows it is large at 15–25 Å. Likely cause: alignment at bin 2
+  (13.3 Å pixel) with a 30 Å low-pass cannot see the 15–25 Å signal that defined RELION's poses, and its
+  angular / shift steps (0.5°, sub-voxel at bin 2) add pose noise there. Next: align at higher resolution
+  (bin 1, low-pass ~18–20 Å, finer last level), and/or keep a particle's pose unless the CC improves.
 
 ## `ctf: amplitude` on novaCTF and Warp tomograms (2026-10-17, RTX A5000)
 

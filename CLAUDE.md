@@ -34,7 +34,7 @@ src/py3sta/
                      particles.py (ParticleSet = RELION-4 particle table + tomo_key naming)
   pipeline/          config.py (yaml schema), project.py (init, load, cycle input checks, next_cycle), flags.py (flag), variance.py (py3sta variance),
                      manifest.py (run_step, change tracking, states), steps.py (step order, pose sources,
-                     01_average, 02_reference, 03_align, 04_msa, 07_select, 08_final), classify.py (05_classify:
+                     01_average, 02_reference, 03_align, 04_msa, 07_select, 08_final; gold_standard = per-half refs/align/select), classify.py (05_classify:
                      named runs, per-run cache, comparison; method groups = lasso groups), embed.py (06_embed),
                      explore.py (py3sta explore: offline HTML, lasso groups file), runner.py (run_cycle, status)
   chimerax.py        open maps in a running ChimeraX (REST remote control); stacks -> one model per volume
