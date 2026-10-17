@@ -28,7 +28,7 @@ wedge diagnostics, PNGs), `05_classify` (kmeans / ward / gmm, list of K, stabili
 on-demand `py3sta variance`.
 
 **Phase 4 — embedding + lasso selection** ✅ (2026-10-16, see below): `06_embed`, `py3sta explore` (offline HTML,
-lasso groups), groups as a classify run. Parked by the user: automatic exclusion / whitening of wedge factors.
+lasso groups), groups as a classify run. Wedge factors: whitening per run (default), warnings only (2026-10-16, see below).
 
 **Phase 5 — select + full cycle** (2026-10-16, see below): `select.target: each` (anchor = best-SNR class or
 `select.anchor`) ✅; full MIM019 cycle 0 → 1 run end to end ✅. Acceptance mixed: with all classes aligned
@@ -37,8 +37,8 @@ select is ~identity; excluding the 35 Å class keeps 16.3 Å with 60 % of the pa
 handle alignment from already-refined poses (see "Open" in the Phase 5 section).
 
 **Phase 6 — dashboard** (started 2026-10-16, see below; user: Dash, shared workstation → token). v1 read-only ✅:
-`py3sta dashboard` (cycles overview, Maps, Plots, Logs, ChimeraX). Next: v2 (job queue, cycle.yaml form, select
-page, explore + live lasso averages, particles / flags).
+`py3sta dashboard` (cycles overview, Maps, Plots, Logs, ChimeraX). v2 (job queue, cycle.yaml form, select
+page, explore + live lasso averages, particles / flags) on hold by the user.
 
 **Phase 2 — particle alignment (MRA)**, in three parts:
 1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
@@ -94,6 +94,46 @@ exactly (ARI 1.0) and go through select → final.
   and warns when `classify.factors` include factors msa flagged.
 - gmm BIC decreases monotonically up to K = 8 (no minimum): continuous variability, BIC not a K selector here.
 - Timing of classify (6081 × 8): kmeans 2.7 s (GPU, 5 K + 10 bootstraps each), ward 24 s, gmm 24 s.
+
+## Wedge whitening of the factor scores (2026-10-16)
+
+User decision (the parked Phase 3 question): option 2, whitening; flagged factors and wedge-following classes
+are only warned about (nothing excluded automatically); WedgeR is reported so the dashboard can later let the
+user avoid such factors / classifications. Default on (user).
+
+- `msa.whiten_wedge(X, mats)`: per factor, least squares of the scores on the 12 wedge features (rank 10:
+  the traces of a aᵀ and z zᵀ are 1) + intercept; the fitted wedge part is subtracted, mean kept. Only factors
+  whose fit beats chance (adjusted R² > 0) are changed: a 12-feature fit explains ~p/n of any column by chance —
+  on the 32-particle test project it removed the state signal before this guard. Returns the variance fraction
+  removed per factor. Linear only: non-linear wedge dependence stays, so the class WedgeR check stays.
+- `classify` runs and `embed`: `wedge: whiten | keep` (default whiten), applied before `standardize` / UMAP;
+  part of the run key (changing it recomputes only that run). Each whitened run writes `wedge.star`
+  (py3staWedgeRemoved per factor); `summary.star` / `compare.star` get `py3staWedge` and `py3staWedgeRemoved`
+  (variance-weighted fraction of the run's factors); the manifest info has it per classification. Warnings: the
+  msa-flagged-factors warning says "whitened … check the classes' WedgeR" (or suggests whiten / dropping them
+  with keep); class WedgeR > 0.3 still warns; fewer than 240 particles (20 per feature) warns that whitening
+  is noisy.
+- Tests: synthetic two states under a 6× stronger wedge component (600 random poses): raw kmeans ARI < 0.2 with
+  class WedgeR > 0.5; whitened ARI > 0.95, WedgeR < 0.1; pure-noise column untouched (< 5 %); means kept; no
+  linear wedge correlation left. Pipeline: default whiten, `wedge.star`, compare columns, `keep` → stale,
+  old warning text, validation.
+
+MIM019 (`data/mim019_cycle` cycle 0 after alignment, 6081 particles, kmeans, 10 bootstrap subsets; 154 s for
+6 runs):
+
+| run | wedge | removed | K003 WedgeR / weakest Jaccard / best class | K004 WedgeR / weakest Jaccard / best class |
+|---|---|---|---|---|
+| factors 1–8 | keep | — | **0.34** / 0.75 / 18.8 Å | **0.41** / 0.58 / 21.0 Å |
+| factors 1–8 | whiten | 16 % (factors 2–6: 29–32 %; 1: 1 %, 7–8: 0 %) | 0.03 / 0.97 / 16.7 Å | 0.18 / 0.79 / 16.7 Å |
+| factors 1, 7, 8 | keep | — | 0.05 / 0.97 / 16.6 Å | 0.05 / 0.91 / 19.1 Å |
+| factors 1, 7, 8 | whiten | 0.7 % | 0.02 / 0.98 / 16.7 Å | 0.02 / 0.80 / 19.1 Å |
+| UMAP, factors 1–8 | whiten | 16 % | 0.04 / 0.99 / 16.5 Å | 0.03 / 0.93 / 16.6 Å |
+
+Agreement (ARI) at K003: whitened 1–8 vs the hand-picked clean factors 0.97 (whitened) / 0.93 (kept); kept 1–8
+vs clean 0.56. Whitening makes all eight factors usable without choosing them by hand: the wedge-driven K003 /
+K004 splits disappear, stability and the best class improve, and the clean factors barely change. K004 on
+whitened 1–8 keeps WedgeR 0.18 (non-linear rest; below the 0.3 warning). The 29–32 % removed from factors 2–6 matches
+their msa wedge r ≈ 0.54 (R² ≈ 0.29); the remaining 70 % of those factors no longer follows the wedge linearly.
 
 ## Phase 6 v1 — read-only dashboard (2026-10-16)
 

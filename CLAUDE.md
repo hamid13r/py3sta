@@ -20,7 +20,8 @@ src/py3sta/
   poses.py           pose composition: delta (R, t) in the reference frame -> M' = R M, c' = c + M'.T t
   mra.py             particle alignment: cone/spin levels, constrained CC (wedge on both maps), best reference
   msa.py             MSA stack at the current poses (wmd = wedge-masked differences | plain ± own wedge),
-                     randomized PCA (numpy + torch), wedge / tomogram factor diagnostics
+                     randomized PCA (numpy + torch), wedge / tomogram factor diagnostics, wedge whitening
+                     of the factor scores (classify/embed `wedge: whiten`, default)
   variance.py        voxel-wise variance of the aligned particles (wmd / plain), normalised in a chosen mask
   cluster.py         kmeans (numpy + torch), Ward, GMM (BIC), HDBSCAN, UMAP embedding, classes by size, ARI,
                      bootstrap stability

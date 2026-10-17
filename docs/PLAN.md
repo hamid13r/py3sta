@@ -207,7 +207,9 @@ tunnel (`ssh -L 8050:localhost:8050 workstation`).
    - "Open in ChimeraX" (REST remote control) for any map.
 5. **Explore / classify** — the UMAP/PCA explorer (§2 step 7) embedded: colour by class / score /
    tomogram, **lasso to define groups**, live class average of the current lasso selection (GPU),
-   compare K values and methods side by side.
+   compare K values and methods side by side; per factor its wedge r (msa `factors.star`) and the variance
+   whitening removed (`wedge.star`), per classification its WedgeR / WedgeRemoved (`compare.star`), so the
+   user can avoid wedge-driven factors and classifications (py3sta only warns).
 6. **Select** — choose a classification (K, method, or lasso groups); per class a card with its average,
    member count and an `align / leave / exclude` toggle; target `each other` or a reference MRC; preview
    of the aligned class averages; "write _final.star".
