@@ -316,6 +316,39 @@ def explore(project_dir, cycle, out, plotly_js, pcs):
                "{method: groups, file: groups/NAME.json}")
 
 
+@main.command()
+@click.argument("project_dir")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Interface to listen on (127.0.0.1: this machine only; reach it with ssh -L PORT:localhost:PORT).")
+@click.option("--port", default=8050, show_default=True, type=int)
+@click.option("--token", default=None, help="Access token (default: a new random one, printed in the URL).")
+@click.option("--no-token", is_flag=True, help="No access token (single-user machines only).")
+@click.option("--debug", is_flag=True, help="Dash debug mode (reload on code changes).")
+def dashboard(project_dir, host, port, token, no_token, debug):
+    """Browser dashboard of a project: cycles, step states, resolution, logs. Needs `pip install dash`."""
+    import socket
+
+    from .pipeline import ConfigError, load_project
+
+    try:
+        from .dashboard.app import new_token, serve
+    except ImportError as e:
+        raise click.ClickException(f"the dashboard needs dash: pip install 'py3sta[dashboard]' ({e})")
+    try:
+        root = load_project(project_dir).root.resolve()
+    except ConfigError as e:
+        raise click.ClickException(str(e))
+    with socket.socket() as s:
+        if s.connect_ex((host if host != "0.0.0.0" else "127.0.0.1", port)) == 0:
+            raise click.ClickException(f"port {port} is in use (another dashboard?): choose one with --port")
+    token = None if no_token else (token or new_token())
+    url = f"http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{port}/" + (f"?token={token}" if token else "")
+    click.echo(f"py3sta dashboard of {root}\n  {url}")
+    if host == "127.0.0.1":
+        click.echo(f"  from another computer: ssh -L {port}:localhost:{port} {socket.gethostname()}, then open the URL")
+    serve(root, host, port, token, debug)
+
+
 @main.command("next")
 @click.argument("project_dir")
 @click.argument("cycle")

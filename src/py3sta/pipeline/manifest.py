@@ -146,9 +146,24 @@ class StepContext:
         self.log(f"warning: {msg}")
 
 
+LOG_FILE = "log.txt"
+
+
+def _tee(path: Path, log):
+    """A log function that also appends time-stamped lines to ``path`` (flushed: readable while running)."""
+    fh = open(path, "w", buffering=1)
+
+    def write(msg: str) -> None:
+        fh.write(f"{dt.datetime.now():%H:%M:%S} {msg}\n")
+        if log is not None:
+            log(msg)
+    return write, fh
+
+
 def run_step(root, folder, name: str, params: dict, fn, force: bool = False, device: str | None = None,
              log=None, extra: dict | None = None) -> dict:
     """Run ``fn(ctx)`` as step ``name`` in ``folder`` with change tracking; returns the manifest.
+    The step's log lines are also written to ``folder/log.txt``.
 
     Refuses if a previous run is still running, or if one of its STAR outputs was edited (``force``:
     the edited file is kept as ``<name>.edited-<date>.star``). Old outputs are removed first.
@@ -177,6 +192,7 @@ def run_step(root, folder, name: str, params: dict, fn, force: bool = False, dev
          "inputs": {"star": {}, "files": {}, "steps": {}}, "outputs": {"star": {}, "files": []},
          "info": {}, "warnings": [], "error": None, **(extra or {})}
     write_manifest(folder, m)
+    log, log_fh = _tee(folder / LOG_FILE, log)
     ctx = StepContext(root, folder, m, log)
     t0 = time.time()
     try:
@@ -191,11 +207,13 @@ def run_step(root, folder, name: str, params: dict, fn, force: bool = False, dev
         m["status"] = "failed"
         m["error"] = f"{type(e).__name__}: {e}"
         m["traceback"] = traceback.format_exc(limit=8)
+        log_fh.write(f"{m['error']}\n{m['traceback']}")
         raise
     finally:
         m["finished"] = _now()
         m["seconds"] = round(time.time() - t0, 2)
         write_manifest(folder, m)
+        log_fh.close()
     return m
 
 
