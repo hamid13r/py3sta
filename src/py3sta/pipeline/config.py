@@ -356,6 +356,7 @@ class SelectConfig:
 @dataclass
 class CycleConfig:
     cycle: int = 0
+    gold_standard: bool = False                 # half sets (rlnRandomSubset) aligned to their own half references
     ctf: CtfConfig = field(default_factory=CtfConfig)  # belongs to the tomograms in 00_input.star
     average: AverageConfig = field(default_factory=AverageConfig)
     reference: ReferenceConfig = field(default_factory=ReferenceConfig)
@@ -498,6 +499,8 @@ class CycleConfig:
                 resolve_use(self.classify.use, runs)
             except ValueError as e:
                 err.msgs.append(f"classify.use: {e}")
+        err.check(not self.gold_standard or self.reference.mode != "global" or self.average.halves, "gold_standard",
+                  "needs average.halves: true (the half references come from the half averages)")
         sel = self.select
         err.check(sel.align == "all" or isinstance(sel.align, list), "select.align",
                   f"must be 'all' or a list of class numbers (got {sel.align!r})")
@@ -555,6 +558,9 @@ PROJECT_HEADER = """\
 CYCLE_HEADER = """\
 # py3sta cycle configuration (copied to the next cycle by 'py3sta next', then edit)
 # ctf.mode: none | flip | wiener | amplitude -- belongs to the tomograms in 00_input.star ('py3sta ctf-check')
+# gold_standard: true = the two half sets (rlnRandomSubset 1 / 2) never meet: one reference per half (from the half
+#   averages, or the same file references), particles aligned to their own half's reference, class averages
+#   aligned per half in select -> the next cycle's half-map FSC is independent
 # All sizes in Å.  reference.mode: global | file | classes;  mask.shape: sphere | ellipsoid | box | file
 # mask.radius: 1 value (sphere) or 3 (ellipsoid / box half-sizes); reference.invert flips reference files only
 # align: levels [[nut, nstep, spin, sstep], ...] coarse to fine around the current pose (deg); max_shift Å per axis

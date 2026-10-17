@@ -130,7 +130,19 @@ def reference_upstream(c: CycleConfig) -> tuple:
 
 
 def reference_params(p: ProjectConfig, c: CycleConfig) -> dict:
-    return {"reference": dataclasses.asdict(c.reference), "box": p.box, "apix": p.apix}
+    return {"reference": dataclasses.asdict(c.reference), "box": p.box, "apix": p.apix, **_gold(c)}
+
+
+def _gold(c: CycleConfig) -> dict:
+    """Step parameter for gold_standard, only when it is on (projects from before the option stay done)."""
+    return {"gold_standard": True} if c.gold_standard else {}
+
+
+HALVES = (1, 2)
+
+
+def half_references_name(k: int) -> str:
+    return f"references_half{k}.mrcs"
 
 
 def run_reference(ctx, project, n: int, c: CycleConfig) -> None:
@@ -178,7 +190,28 @@ def run_reference(ctx, project, n: int, c: CycleConfig) -> None:
                      "contrast inverted? set reference.invert")
     write_star({"references": pd.DataFrame(rows)}, ctx.output_star("references.star"))
     ctx.info.update(n_references=len(refs), mask_fraction=round(float(mask.mean()), 4),
-                    cc_with_average=[row["py3staReferenceCC"] for row in rows])
+                    cc_with_average=[row["py3staReferenceCC"] for row in rows], gold_standard=c.gold_standard)
+    if c.gold_standard:
+        half_refs = {}
+        for k in HALVES:
+            if r.mode == "global":
+                hp = avg_path.with_name(f"half{k}.mrc")
+                if not hp.is_file():
+                    raise FileNotFoundError(f"{hp}: gold_standard needs the half averages (average.halves: true)")
+                half_refs[k] = prepare_reference(read_mrc(hp, mmap=False)[0], p.apix, mask, r.lowpass, r.highpass)[None]
+            else:
+                half_refs[k] = refs                      # the same external references for both halves
+            d = open_volume_stack(ctx.output(half_references_name(k)), len(half_refs[k]), p.box, np.float32, p.apix,
+                                  mode="w+")
+            d[:] = half_refs[k]
+            d.flush()
+        cc12 = float(masked_cc(half_refs[1][0], half_refs[2][0], mask))
+        ctx.info.update(half_reference_cc=round(cc12, 4))
+        ctx.log(f"gold standard: one reference per half set ({'half averages' if r.mode == 'global' else 'same files'}); "
+                f"CC between the half references {cc12:.3f}")
+        if r.mode != "global" and not r.lowpass:
+            ctx.warn("gold standard with file references and no reference.lowpass: the halves share the "
+                     "references' high-resolution signal")
     ctx.log(f"{len(refs)} reference(s); CC with the current average: "
             + ", ".join(f"{row['py3staReferenceCC']:.3f}" for row in rows))
 
@@ -260,7 +293,37 @@ POSE_COLUMNS = ["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi", "rlnOriginXAngst",
 def align_params(p: ProjectConfig, c: CycleConfig) -> dict:
     return {"align": dataclasses.asdict(c.align), "box": p.box, "apix": p.apix, "ts_apix": p.ts_apix,
             "invert_contrast": p.invert_contrast, "wedge": dataclasses.asdict(p.wedge),
-            "shift_vox": p.align_shift_vox(c.align.max_shift), "pose_source": _source_name("align")}
+            "shift_vox": p.align_shift_vox(c.align.max_shift), "pose_source": _source_name("align"), **_gold(c)}
+
+
+def half_sets(ps, what: str) -> np.ndarray:
+    """rlnRandomSubset of the particles as an int array; gold standard needs both half sets 1 and 2."""
+    if "rlnRandomSubset" not in ps.df:
+        raise ValueError(f"gold_standard: {what} needs rlnRandomSubset (1 / 2) in the particle STAR")
+    h = ps.df["rlnRandomSubset"].to_numpy(int)
+    bad = sorted(set(h.tolist()) - set(HALVES))
+    if bad or not all((h == k).any() for k in HALVES):
+        raise ValueError(f"gold_standard: rlnRandomSubset must hold both half sets 1 and 2 (found {sorted(set(h.tolist()))})")
+    return h
+
+
+def _subset(ps, sel):
+    return dataclasses.replace(ps, df=ps.df[sel].reset_index(drop=True))
+
+
+def _merge_mra(parts, n: int):
+    """One MRAResult from per-half results [(selection, result)]."""
+    from ..mra import MRAResult
+
+    first = parts[0][1]
+    out = {}
+    for name in ("R", "t", "cc", "best_ref", "cc_ref", "at_edge", "angle"):
+        a = getattr(first, name)
+        arr = np.zeros((n,) + a.shape[1:], a.dtype)
+        for sel, res in parts:
+            arr[sel] = getattr(res, name)
+        out[name] = arr
+    return MRAResult(**out)
 
 
 def update_particles(out, names, values: dict) -> None:
@@ -306,7 +369,13 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
     cin = load_cycle_input(project, n, path)
     ctx.use_files(cin.tomograms.values(), "tomogram")
     ref_dir = project.cycle_dir(n) / get_step("reference").folder
-    refs = np.array(read_mrc(ref_dir / "references.mrcs", mmap=False)[0]).reshape(-1, p.box, p.box, p.box)
+
+    def load_refs(name):
+        if not (ref_dir / name).is_file():
+            raise FileNotFoundError(f"{ref_dir / name}: re-run the reference step"
+                                    + (" (gold_standard: true)" if "half" in name else ""))
+        return np.array(read_mrc(ref_dir / name, mmap=False)[0]).reshape(-1, p.box, p.box, p.box)
+    refs = load_refs("references.mrcs")
     mask = _step_mask(ctx, project, n, a.mask)
     tilts = _tilts(ctx, project, cin) if a.wedge else None
     settings = MRASettings(levels=[list(map(float, lv)) for lv in a.levels], max_shift=p.align_shift_vox(a.max_shift),
@@ -319,8 +388,20 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
     ctx.log(f"aligning {len(ps)} particles to {len(refs)} reference(s): {nrot} rotations per reference, "
             f"shift <= {settings.max_shift} voxel(s) (x, y, z), bin {a.bin}, {'constrained' if tilts else 'plain'} CC"
             + (f", min_gain {a.min_gain}" if a.min_gain else "") + f"; {label}")
-    res = align_particles(ps, ParticleStack.open(project.stack_dir), refs, mask, p.apix, settings, tilts,
-                          invert=p.invert_contrast, device=device, progress=_progress(ctx, len(ps)))
+    stack = ParticleStack.open(project.stack_dir)
+    if c.gold_standard:
+        halves = half_sets(ps, "align")
+        parts = []
+        for k in HALVES:
+            sel = halves == k
+            ctx.log(f"gold standard: half set {k} ({int(sel.sum())} particles) against its own reference")
+            parts.append((sel, align_particles(_subset(ps, sel), stack, load_refs(half_references_name(k)), mask, p.apix,
+                                               settings, tilts, invert=p.invert_contrast, device=device,
+                                               progress=_progress(ctx, int(sel.sum())))))
+        res = _merge_mra(parts, len(ps))
+    else:
+        res = align_particles(ps, stack, refs, mask, p.apix, settings, tilts,
+                              invert=p.invert_contrast, device=device, progress=_progress(ctx, len(ps)))
     new = apply_delta(ps, res.R, res.t, p.apix)
     names = ps.df[PARTICLE_NAME].astype(str).to_numpy()
     shift_A = np.linalg.norm(res.t, axis=1) * p.apix
@@ -341,7 +422,8 @@ def run_align(ctx, project, n: int, c: CycleConfig) -> None:
     ctx.info.update(enabled=True, n_aligned=len(ps), pose_source=src, n_rotations=nrot,
                     n_unchanged=int(((res.angle < 1e-6) & (np.abs(res.t).max(1) < 1e-6)).sum()),
                     angle_median=round(float(np.median(res.angle)), 2), shift_median_A=round(float(np.median(shift_A)), 2),
-                    cc_median=round(float(np.median(res.cc)), 4), n_at_edge=n_edge, best_reference_counts=counts)
+                    cc_median=round(float(np.median(res.cc)), 4), n_at_edge=n_edge, best_reference_counts=counts,
+                    gold_standard=c.gold_standard)
     ctx.log(f"median change {np.median(res.angle):.2f}°, {np.median(shift_A):.2f} Å; median CC {np.median(res.cc):.3f}; "
             f"at the search edge: {n_edge}" + (f"; best reference counts {counts}" if len(refs) > 1 else ""))
     if n_edge > 0.1 * len(ps):
@@ -456,7 +538,8 @@ def select_params(p: ProjectConfig, c: CycleConfig) -> dict:
     except ValueError:
         used = None                                         # reported when select runs
     return {"select": dataclasses.asdict(c.select), "classification": used, "box": p.box, "apix": p.apix,
-            "pose_source": _source_name("select")}
+            "pose_source": _source_name("select"), **_gold(c),
+            **({"average": average_params(p, c)} if c.gold_standard else {})}
 
 
 def class_actions(ids, s) -> dict:
@@ -536,54 +619,81 @@ def run_select(ctx, project, n: int, c: CycleConfig) -> None:
 
     ref_dir = cdir / get_step("reference").folder
     mask = read_mrc(ref_dir / "mask.mrc", mmap=False)[0]
+    # gold standard: every class is averaged and aligned per half set, each half to its own target
+    halves = half_sets(cin.particles, "select") if c.gold_standard else np.zeros(len(cls), int)
+    groups = list(HALVES) if c.gold_standard else [0]
+    if c.gold_standard:
+        average = _averager(ctx, project, c, cin)
+        avgs = {}
+        for h in groups:
+            avgs[h] = np.zeros((len(ids), p.box, p.box, p.box), np.float32)
+            for k, cid in enumerate(ids):
+                m = (cls == cid) & (halves == h)
+                if m.any():
+                    avgs[h][k] = average(_subset(cin.particles, m)).average
+        ctx.log("gold standard: class averages and their alignment per half set")
+    else:
+        avgs = {0: averages}
     anchor = None
     if s.target == "each":
         anchor, why = pick_anchor(classes, actions, s.anchor)
-        target = np.array(averages[list(ids).index(anchor)])
+        targets = {h: np.array(avgs[h][list(ids).index(anchor)]) for h in groups}
         ctx.log(f"target each: anchor class {anchor} ({why})")
     elif s.target == "reference":
-        refs = read_mrc(ref_dir / "references.mrcs", mmap=False)[0].reshape(-1, p.box, p.box, p.box)
-        target = np.array(refs[0])
-        if len(refs) > 1:
-            ctx.warn(f"{len(refs)} references: class averages are aligned to reference 1")
+        def ref1(name):
+            refs = read_mrc(ref_dir / name, mmap=False)[0].reshape(-1, p.box, p.box, p.box)
+            if len(refs) > 1:
+                ctx.warn(f"{len(refs)} references: class averages are aligned to reference 1")
+            return np.array(refs[0])
+        if c.gold_standard:
+            missing = [half_references_name(h) for h in groups if not (ref_dir / half_references_name(h)).is_file()]
+            if missing:
+                raise FileNotFoundError(f"{ref_dir}: no {', '.join(missing)}: re-run the reference step (gold_standard: true)")
+        targets = {h: ref1(half_references_name(h) if c.gold_standard else "references.mrcs") for h in groups}
     else:
         f = resolve_file(s.target, project.root)
         ctx.use_files([f], "target")
-        target = load_map(f, p.apix, p.box)
+        t = load_map(f, p.apix, p.box)
+        targets = {h: t for h in groups}
     device, _ = resolve_device(p.compute)
 
     ps = cin.particles
     rows = []
     cc_of = {}
-    aligned = open_volume_stack(ctx.output("classes_aligned.mrcs"), len(ids), p.box, np.float32, p.apix, mode="w+")
-    for k, cid in enumerate(ids):
-        act = actions[int(cid)]
-        members = cls == cid
-        row = {CLASS_COLUMN: int(cid), "py3staClassAction": act, "py3staClassCount": int(members.sum()),
-               "rlnAngleRot": 0.0, "rlnAngleTilt": 0.0, "rlnAnglePsi": 0.0,
-               "rlnOriginXAngst": 0.0, "rlnOriginYAngst": 0.0, "rlnOriginZAngst": 0.0, "py3staClassCC": np.nan}
-        if anchor is not None:
-            row["py3staClassAnchor"] = int(cid == anchor)
-        aligned[k] = averages[k]
-        if cid == anchor:
-            ctx.log(f"class {cid} ({int(members.sum())}): anchor, poses kept")
-        elif act == "align" and members.any():
-            res = align_maps(target, averages[k], p.apix, mask, lowpass=s.lowpass, highpass=s.highpass,
-                             bin_factor=s.bin, step=s.step, max_shift_A=s.max_shift, try_mirror=False, device=device)
-            if res.inverted_contrast_suspected:
-                ctx.warn(f"class {cid}: anti-correlates with the target (min CC {res.min_cc:.2f}): contrast inverted?")
-            ps = apply_delta(ps, res.matrix, res.shift, p.apix, rows=members)
-            aligned[k] = apply_alignment(averages[k], res)
-            row.update(zip(["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi"], np.round(res.euler, 3)))
-            row.update(zip(["rlnOriginXAngst", "rlnOriginYAngst", "rlnOriginZAngst"], np.round(res.shift * p.apix, 3)))
-            row["py3staClassCC"] = round(res.cc, 4)
-            ctx.log(f"class {cid} ({int(members.sum())}): rot/tilt/psi {np.round(res.euler, 1)}, "
-                    f"shift {np.round(res.shift * p.apix, 1)} Å, CC {res.cc:.3f}")
-        else:
-            ctx.log(f"class {cid} ({int(members.sum())}): {act}")
-        cc_of[int(cid)] = row["py3staClassCC"]
-        rows.append(row)
-    aligned.flush()
+    for h in groups:
+        tag = f"half {h}, " if c.gold_standard else ""
+        aligned = open_volume_stack(ctx.output(f"classes_aligned_half{h}.mrcs" if c.gold_standard else "classes_aligned.mrcs"),
+                                    len(ids), p.box, np.float32, p.apix, mode="w+")
+        for k, cid in enumerate(ids):
+            act = actions[int(cid)]
+            members = (cls == cid) & (halves == h)
+            row = {CLASS_COLUMN: int(cid), "py3staClassAction": act, "py3staClassCount": int(members.sum()),
+                   "rlnAngleRot": 0.0, "rlnAngleTilt": 0.0, "rlnAnglePsi": 0.0,
+                   "rlnOriginXAngst": 0.0, "rlnOriginYAngst": 0.0, "rlnOriginZAngst": 0.0, "py3staClassCC": np.nan}
+            if c.gold_standard:
+                row = {CLASS_COLUMN: int(cid), "py3staHalf": h, **{k_: v for k_, v in row.items() if k_ != CLASS_COLUMN}}
+            if anchor is not None:
+                row["py3staClassAnchor"] = int(cid == anchor)
+            aligned[k] = avgs[h][k]
+            if cid == anchor:
+                ctx.log(f"{tag}class {cid} ({int(members.sum())}): anchor, poses kept")
+            elif act == "align" and members.any():
+                res = align_maps(targets[h], avgs[h][k], p.apix, mask, lowpass=s.lowpass, highpass=s.highpass,
+                                 bin_factor=s.bin, step=s.step, max_shift_A=s.max_shift, try_mirror=False, device=device)
+                if res.inverted_contrast_suspected:
+                    ctx.warn(f"{tag}class {cid}: anti-correlates with the target (min CC {res.min_cc:.2f}): contrast inverted?")
+                ps = apply_delta(ps, res.matrix, res.shift, p.apix, rows=members)
+                aligned[k] = apply_alignment(avgs[h][k], res)
+                row.update(zip(["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi"], np.round(res.euler, 3)))
+                row.update(zip(["rlnOriginXAngst", "rlnOriginYAngst", "rlnOriginZAngst"], np.round(res.shift * p.apix, 3)))
+                row["py3staClassCC"] = round(res.cc, 4)
+                ctx.log(f"{tag}class {cid} ({int(members.sum())}): rot/tilt/psi {np.round(res.euler, 1)}, "
+                        f"shift {np.round(res.shift * p.apix, 1)} Å, CC {res.cc:.3f}")
+            else:
+                ctx.log(f"{tag}class {cid} ({int(members.sum())}): {act}")
+            cc_of[(int(cid), h)] = row["py3staClassCC"]
+            rows.append(row)
+        aligned.flush()
     write_star({"transforms": pd.DataFrame(rows)}, ctx.output_star("transforms.star"))
 
     # selected.star: all rows of the pose source; active rows get poses, class, score, exclusion
@@ -599,7 +709,7 @@ def run_select(ctx, project, n: int, c: CycleConfig) -> None:
         if col not in out:
             out[col] = default
     out.loc[out.index[pos], "rlnClassNumber"] = cls
-    out.loc[out.index[pos], "py3staClassCC"] = [cc_of[int(k)] for k in cls]
+    out.loc[out.index[pos], "py3staClassCC"] = [cc_of[(int(k), int(h))] for k, h in zip(cls, halves)]
     excl = np.array([actions[int(k)] == "exclude" for k in cls])
     if excl.any():
         if "py3staExcludedCycle" not in out:
@@ -608,7 +718,8 @@ def run_select(ctx, project, n: int, c: CycleConfig) -> None:
         out.loc[out.index[pos[excl]], "py3staExcludedCycle"] = n
     write_star(blocks, ctx.output_star("selected.star"))
     ctx.info.update(classification=f_cls, actions={str(k): v for k, v in actions.items()}, n_excluded_now=int(excl.sum()),
-                    class_cc={str(k): v for k, v in cc_of.items()}, pose_source=src, anchor=anchor)
+                    class_cc={"/".join(map(str, k if c.gold_standard else k[:1])): v for k, v in cc_of.items()},
+                    pose_source=src, anchor=anchor, gold_standard=c.gold_standard)
 
 
 # ------------------------------------------------------------------- final
