@@ -129,8 +129,31 @@ full cycle 0 → `next` → cycle-1 average. nova needed its own stack (1010 s f
   high-frequency signal but also more noise, and its poses are not converged yet.
 - Classes: same picture as Warp (K003 stable, wedge r ≤ 0.03 whitened, best class 17.7 vs 16.7 Å); select each:
   classes in register (≤ 0.2° net, ≤ 0.3 Å). Same three low-CC tomograms in both after the cycle.
-- Not concluded yet: whether novaCTF passes Warp after more alignment rounds (the next cycle's align on nova
-  will show whether the poses keep moving and the half-map FSC keeps improving).
+- Cycles 1–3 on each arm (full cycles, novaCTF first, then Warp; `next`; cycle-4 average = result of cycle 3;
+  ~9.5 min per cycle):
+
+| arm, cycle average | half-map FSC 0.143 | template FSC 0.5 | FSC vs template 30 / 25 / 22 / 19 / 17 Å | align of that cycle (median) |
+|---|---|---|---|---|
+| novaCTF 0 | 21.1 Å | 17.7 Å | 0.93 / 0.88 / 0.68 / 0.61 / 0.47 | 1.42°, 3.80 Å |
+| novaCTF 1 | 18.2 Å | 16.5 Å | 0.94 / 0.91 / 0.76 / 0.72 / 0.55 | 0.50°, 0.55 Å |
+| novaCTF 2 | 18.1 Å | 16.5 Å | 0.94 / 0.91 / 0.76 / 0.71 / 0.55 | 0.00°, 0.27 Å |
+| novaCTF 3 | 18.1 Å | 16.5 Å | 0.94 / 0.91 / 0.76 / 0.71 / 0.55 | 0.00°, 0.25 Å |
+| novaCTF 4 | 18.0 Å | 16.6 Å | 0.94 / 0.91 / 0.75 / 0.71 / 0.55 | — |
+| Warp 0 | 16.8 Å | 16.5 Å | 0.95 / 0.88 / 0.74 / 0.65 / 0.54 | 0.00°, 0.50 Å |
+| Warp 1 | 16.9 Å | 16.6 Å | 0.95 / 0.88 / 0.74 / 0.64 / 0.53 | 0.00°, 0.18 Å |
+| Warp 2 | 16.9 Å | 16.7 Å | 0.95 / 0.88 / 0.74 / 0.64 / 0.52 | 0.00°, 0.12 Å |
+| Warp 3 | 16.9 Å | 16.8 Å | 0.94 / 0.88 / 0.73 / 0.64 / 0.52 | 0.00°, 0.11 Å |
+| Warp 4 | 16.9 Å | 16.8 Å | 0.94 / 0.87 / 0.73 / 0.63 / 0.52 | — |
+
+  Both converge by cycle 2 (novaCTF: 2 cycles to move off the Warp-refined poses; Warp: already converged).
+  Converged, novaCTF has the worse half-map FSC (18.0 vs 16.9 Å) but the better agreement with the template at
+  25–19 Å (0.91 / 0.75 / 0.71 vs 0.87 / 0.73 / 0.63), equal at 30 and 17 Å and at the template FSC 0.5
+  (16.6 vs 16.8 Å). Reading: novaCTF carries more signal at 19–25 Å and more noise (its high frequencies are
+  4–7× stronger relative to the low ones); half-map FSC rewards Warp's lower noise, the independent template
+  rewards novaCTF's signal. Warp drifts very slightly away from the template over cycles (0.65 → 0.63 at 19 Å)
+  while self-consistency stays — mild overfitting to its own reference, not seen in novaCTF. Caveat: one
+  template (RSTM `template.mrc`); a gold-standard check (independent half-set refinement) or a second
+  reference would confirm. No gain in the half-map resolution at this box/pixel size (6.65 Å, Nyquist 13.3 Å).
 
 ## Wedge whitening of the factor scores (2026-10-16)
 
