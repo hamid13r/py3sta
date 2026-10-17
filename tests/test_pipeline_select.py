@@ -143,3 +143,62 @@ def test_missing_class_column_is_one_class(proj):
     run_cycle(proj, 0, stop="classify")
     m = read_manifest(proj.cycle_dir(0) / "05_classify")
     assert m["info"]["classifications"]["column/all"]["k"] == 1 and "no column rlnClassNumber" in m["warnings"][0]
+
+
+def _common_rotation_spread(a: ParticleSet, b: ParticleSet) -> float:
+    """Max angle (deg) between the per-particle rotations a.M b.M^T and their first one: 0 when a and b differ
+    by one global transform (frame-independent agreement)."""
+    D = np.einsum("nij,nkj->nik", a.matrices, b.matrices)
+    tr = np.einsum("ij,nij->n", D[0], D)
+    return float(np.degrees(np.arccos(np.clip((tr - 1) / 2, -1, 1))).max())
+
+
+@pytest.mark.parametrize("anchor", [None, 2])
+def test_target_each(chiral_proj, anchor):
+    proj = chiral_proj
+    true = _perturb_class2(proj)
+    perturbed = ParticleSet.from_star(proj.cycle_input(0))
+    _edit_yaml(proj.cycle_dir(0) / "cycle.yaml", lambda c: c["select"].update(target="each", anchor=anchor))
+    run_cycle(proj, 0)
+    classes = read_star(proj.cycle_dir(0) / "05_classify" / "column" / "classes_all.star")["classes"]
+    best = int(classes.sort_values(["py3staClassRes", "py3staClassCount"], ascending=[True, False])["py3staClass"].iloc[0])
+    want = best if anchor is None else anchor
+    sel = proj.cycle_dir(0) / "07_select"
+    assert read_manifest(sel)["info"]["anchor"] == want
+    tr = read_star(sel / "transforms.star")["transforms"].set_index("py3staClass")
+    assert tr["py3staClassAnchor"].to_dict() == {1: int(want == 1), 2: int(want == 2)}
+    fin = ParticleSet.from_star(_final(proj))
+    assert _common_rotation_spread(fin, true) < 1.0                    # both classes in register
+    keep = fin.df["rlnRandomSubset"].to_numpy() == want                # anchor members keep their poses
+    np.testing.assert_allclose(_angles(fin, perturbed)[keep], 0, atol=1e-4)
+    np.testing.assert_allclose(fin.centers_px[keep], perturbed.centers_px[keep], atol=1e-4)
+    if want == 1:
+        assert _angles(fin, true).max() < 1.0
+
+
+def test_pick_anchor_and_validation(chiral_proj):
+    import pandas as pd
+
+    from py3sta.pipeline.steps import pick_anchor
+
+    cl = pd.DataFrame({"py3staClass": [0, 1, 2, 3], "py3staClassCount": [50, 10, 30, 30],
+                       "py3staClassRes": [9.0, 20.0, 25.0, 25.0]})
+    act = {0: "align", 1: "exclude", 2: "align", 3: "align"}
+    assert pick_anchor(cl, act)[0] == 2                     # 0 (noise) skipped; 1 excluded; tie on res -> order kept
+    assert pick_anchor(cl.assign(py3staClassCount=[50, 10, 30, 40]), act) == (3, "best resolution 25 Å, 40 particles")
+    assert pick_anchor(cl.assign(py3staClassRes=np.nan), act)[1].startswith("largest class")
+    assert pick_anchor(cl, act, anchor=0)[0] == 0
+    with pytest.raises(ValueError, match="not an align class"):
+        pick_anchor(cl, act, anchor=1)
+    cy = chiral_proj.cycle_dir(0) / "cycle.yaml"
+    _edit_yaml(cy, lambda c: c["select"].update(anchor=1))
+    with pytest.raises(ConfigError, match="only used with target: each"):
+        load_project(chiral_proj.root).cycle_config(0)
+    _edit_yaml(cy, lambda c: c["select"].update(target="each", leave=[1]))
+    with pytest.raises(ConfigError, match="class 1 is not aligned"):
+        load_project(chiral_proj.root).cycle_config(0)
+    _edit_yaml(cy, lambda c: c["select"].update(leave=[]))
+    run_cycle(load_project(chiral_proj.root), 0)
+    _edit_yaml(cy, lambda c: c["select"].update(anchor=2))
+    st = step_state(load_project(chiral_proj.root), 0, "select")
+    assert st.state == "stale" and st.reasons == ["select.anchor 1→2"]

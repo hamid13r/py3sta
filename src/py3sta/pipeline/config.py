@@ -340,7 +340,8 @@ class SelectConfig:
     align: typing.Union[str, typing.List[int]] = "all"   # classes aligned to the target ("all" = the rest)
     leave: typing.List[int] = field(default_factory=list)    # poses kept
     exclude: typing.List[int] = field(default_factory=list)  # members get py3staExcluded = 1
-    target: str = "reference"                   # reference (02_reference, reference 1) | path to an MRC
+    target: str = "reference"                   # reference (02_reference, reference 1) | each | path to an MRC
+    anchor: typing.Optional[int] = None         # target each: the class the others are aligned to (null = best SNR)
     lowpass: typing.Optional[float] = 30.0      # Å, alignment search
     highpass: typing.Optional[float] = None     # Å
     bin: int = 2                                # binning of the global search
@@ -503,6 +504,10 @@ class CycleConfig:
         err.check(sel.bin >= 1, "select.bin", f"must be >= 1 (got {sel.bin})")
         err.check(0 < sel.step <= 90, "select.step", f"must be in (0, 90] degrees (got {sel.step})")
         err.check(sel.max_shift >= 0, "select.max_shift", f"must be >= 0 Å (got {sel.max_shift})")
+        if sel.anchor is not None:
+            err.check(sel.target == "each", "select.anchor", f"only used with target: each (target is {sel.target!r})")
+            err.check(sel.anchor not in sel.leave + sel.exclude and (sel.align == "all" or sel.anchor in sel.align),
+                      "select.anchor", f"class {sel.anchor} is not aligned (it must be one of the align classes)")
         if project is not None and sel.lowpass:
             err.check(sel.lowpass >= 2 * project.apix * sel.bin, "select.lowpass",
                       f"{sel.lowpass:g} Å is beyond Nyquist of the binned search ({2 * project.apix * sel.bin:g} Å); "
@@ -558,7 +563,9 @@ CYCLE_HEADER = """\
 #   method groups: lasso groups drawn in 'py3sta explore' (file: groups/NAME.json); class 0 = not in any group
 # embed: 2D map of the MSA factors for 'py3sta explore': method umap | tsne | pca (the first two factors listed)
 # select: per class align | leave | exclude ("align: all" = every class not listed elsewhere);
-#   target: reference (02_reference, reference 1) or an MRC path; lowpass / highpass / max_shift in Å, step in deg
+#   target: reference (02_reference, reference 1) | each | an MRC path; each: the align classes are aligned to an
+#   anchor class (anchor: class number, null = best SNR = best class resolution, then the largest class) whose
+#   members keep their poses; lowpass / highpass / max_shift in Å, step in deg
 """
 
 

@@ -17,7 +17,7 @@ def _to_numeric(df: pd.DataFrame) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c])
         except (ValueError, TypeError):
             try:                                       # pandas does not parse "nan" (written for missing values)
-                df[c] = pd.to_numeric(df[c].replace(_NAN))
+                df[c] = pd.to_numeric(df[c].where(~df[c].isin(_NAN), None))
             except (ValueError, TypeError):
                 pass
     return df

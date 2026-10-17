@@ -272,9 +272,12 @@ def update_particles(out, names, values: dict) -> None:
 
     pos = pd.Series(np.arange(len(out)), index=out[PARTICLE_NAME].astype(str)).loc[list(names)].to_numpy()
     for col, v in values.items():
+        v = np.asarray(v)
         if col not in out:
-            out[col] = 0
-        out.loc[out.index[pos], col] = np.asarray(v)
+            out[col] = np.zeros(len(out), v.dtype)
+        elif v.dtype.kind == "f" and out[col].dtype.kind in "iu":
+            out[col] = out[col].astype(float)
+        out.loc[out.index[pos], col] = v
 
 
 def run_align(ctx, project, n: int, c: CycleConfig) -> None:
@@ -472,8 +475,29 @@ def class_actions(ids, s) -> dict:
     return out
 
 
+def pick_anchor(classes, actions: dict, anchor=None) -> tuple[int, str]:
+    """(class, reason) of the anchor of target ``each``: ``anchor`` if given, else the best SNR among the align
+    classes = best resolution (py3staClassRes), then the largest; class 0 (noise / no group) only if alone."""
+    rows = classes[[actions[int(k)] == "align" for k in classes[CLASS_COLUMN]]]
+    if rows.empty:
+        raise ValueError("target each: no class is set to align")
+    if anchor is not None:
+        if int(anchor) not in rows[CLASS_COLUMN].astype(int).tolist():
+            raise ValueError(f"select.anchor: class {anchor} is not an align class of this classification "
+                             f"(align classes: {rows[CLASS_COLUMN].astype(int).tolist()})")
+        return int(anchor), "select.anchor"
+    if (rows[CLASS_COLUMN] > 0).any():
+        rows = rows[rows[CLASS_COLUMN] > 0]
+    res = rows["py3staClassRes"].astype(float) if "py3staClassRes" in rows else np.full(len(rows), np.nan)
+    order = np.lexsort((-rows["py3staClassCount"].to_numpy(int), np.nan_to_num(np.asarray(res, float), nan=np.inf)))
+    best = rows.iloc[order[0]]
+    r = float(best["py3staClassRes"]) if "py3staClassRes" in rows else np.nan
+    why = f"best resolution {r:g} Å" if np.isfinite(r) else "largest class (no class resolution)"
+    return int(best[CLASS_COLUMN]), f"{why}, {int(best['py3staClassCount'])} particles"
+
+
 def run_select(ctx, project, n: int, c: CycleConfig) -> None:
-    """Align class averages to the target and compose each class transform onto its members (poses.py);
+    """Align class averages to the target (reference, an MRC, or ``each``: the anchor class) and compose each class transform onto its members (poses.py);
     leave keeps poses; exclude sets py3staExcluded. Writes selected.star (every particle of the pose source)."""
     import pandas as pd
 
@@ -512,7 +536,12 @@ def run_select(ctx, project, n: int, c: CycleConfig) -> None:
 
     ref_dir = cdir / get_step("reference").folder
     mask = read_mrc(ref_dir / "mask.mrc", mmap=False)[0]
-    if s.target == "reference":
+    anchor = None
+    if s.target == "each":
+        anchor, why = pick_anchor(classes, actions, s.anchor)
+        target = np.array(averages[list(ids).index(anchor)])
+        ctx.log(f"target each: anchor class {anchor} ({why})")
+    elif s.target == "reference":
         refs = read_mrc(ref_dir / "references.mrcs", mmap=False)[0].reshape(-1, p.box, p.box, p.box)
         target = np.array(refs[0])
         if len(refs) > 1:
@@ -533,8 +562,12 @@ def run_select(ctx, project, n: int, c: CycleConfig) -> None:
         row = {CLASS_COLUMN: int(cid), "py3staClassAction": act, "py3staClassCount": int(members.sum()),
                "rlnAngleRot": 0.0, "rlnAngleTilt": 0.0, "rlnAnglePsi": 0.0,
                "rlnOriginXAngst": 0.0, "rlnOriginYAngst": 0.0, "rlnOriginZAngst": 0.0, "py3staClassCC": np.nan}
+        if anchor is not None:
+            row["py3staClassAnchor"] = int(cid == anchor)
         aligned[k] = averages[k]
-        if act == "align" and members.any():
+        if cid == anchor:
+            ctx.log(f"class {cid} ({int(members.sum())}): anchor, poses kept")
+        elif act == "align" and members.any():
             res = align_maps(target, averages[k], p.apix, mask, lowpass=s.lowpass, highpass=s.highpass,
                              bin_factor=s.bin, step=s.step, max_shift_A=s.max_shift, try_mirror=False, device=device)
             if res.inverted_contrast_suspected:
@@ -575,7 +608,7 @@ def run_select(ctx, project, n: int, c: CycleConfig) -> None:
         out.loc[out.index[pos[excl]], "py3staExcludedCycle"] = n
     write_star(blocks, ctx.output_star("selected.star"))
     ctx.info.update(classification=f_cls, actions={str(k): v for k, v in actions.items()}, n_excluded_now=int(excl.sum()),
-                    class_cc={str(k): v for k, v in cc_of.items()}, pose_source=src)
+                    class_cc={str(k): v for k, v in cc_of.items()}, pose_source=src, anchor=anchor)
 
 
 # ------------------------------------------------------------------- final
