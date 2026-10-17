@@ -155,6 +155,37 @@ full cycle 0 → `next` → cycle-1 average. nova needed its own stack (1010 s f
   template (RSTM `template.mrc`); a gold-standard check (independent half-set refinement) or a second
   reference would confirm. No gain in the half-map resolution at this box/pixel size (6.65 Å, Nyquist 13.3 Å).
 
+## `ctf: amplitude` on novaCTF and Warp tomograms (2026-10-17, RTX A5000)
+
+`ctf.mode` acts on averages only (cycle average, class averages, the reference made from them); alignment and
+MSA use the wedge only (CTF there is Phase 7). So `amplitude` (|CTF| weighting in the Wiener average) can act
+on the poses only through the reference.
+
+1. Same poses (each arm's converged cycle-4 input), `py3sta average` from the tomograms, `none` vs `amplitude`
+   with the per-particle height sign +1 / −1 / 0: amplitude raises the half-map FSC by 0.01–0.04 around the
+   first CTF zeros (34–25 Å) and the template FSC by ~0.03 at 34 Å (Warp also +0.02–0.03 at 25–19 Å); FSC 0.143
+   18.0 → 17.8 Å (novaCTF), 16.9 → 16.8 Å (Warp). The height sign makes no difference at this resolution (all
+   three within 0.01) — kept at the default +1.
+2. Two more full cycles from the converged poses: `amplitude` in copies (`novactf_test/{nova,warp}_amp`, own
+   stack copies) vs `none` in the original projects (cycles 4–5, averages 4–6):
+
+| run, cycle average | FSC 0.143 | half-map FSC 34/30/25/22/19/17/15 Å | template FSC same shells | align of that cycle |
+|---|---|---|---|---|
+| novaCTF none c5 / c6 | 18.1 / 18.1 Å | 0.75 0.70 0.53 0.25 0.20 0.08 0.06 | 0.94 0.94 0.91 0.75 0.71 0.55 0.42 | 0.0°, 0.2 Å |
+| novaCTF amplitude c1 / c2 | 18.0 / 18.0 Å | 0.78 0.73 0.55 0.26 0.21 0.08 0.06 | 0.97 0.95 0.92 0.75 0.71 0.56 0.43 | 0.5°, 0.3–0.6 Å |
+| Warp none c5 / c6 | 16.9 / 16.9 Å | 0.73 0.73 0.47 0.27 0.17 0.16 0.13 | 0.94 0.94 0.87 0.73 0.63 0.52 0.45 | 0.0°, 0.1 Å |
+| Warp amplitude c1 / c2 | 17.9 / 18.0 Å | 0.77 0.74 0.46 0.26 0.15 0.14 0.11 | 0.96 0.95 0.87 0.70 0.63 0.51 0.42 | 0.7° / 1.2 Å, then 0.0°, 0.4 Å |
+
+   novaCTF: a small, consistent gain (low shells +0.02–0.03 half-map, +0.03 template; high shells equal or
+   +0.01) — use `amplitude` for novaCTF. Warp: the same-pose average is unchanged, but the amplitude-weighted
+   reference moves the particles (0.7°, 1.2 Å, alignment CC 0.36 → 0.34) and the next averages lose 1 Å
+   (16.9 → 18.0) and template FSC at 22–15 Å — keep `none` for Warp. Likely Warp's reconstruction already
+   carries CTF amplitude weighting, so weighting again over-suppresses the shells near the zeros. Note
+   novaCTF+amplitude keeps moving particles by a median 0.5° per cycle (not 0.0° as with none): the poses
+   follow the slightly different reference without a measurable gain or loss.
+   (A first attempt failed between cycles because the pipeline code changed under the running jobs — the
+   select parameters gained a key and the finished cycle looked stale; re-run from `next`.)
+
 ## Wedge whitening of the factor scores (2026-10-16)
 
 User decision (the parked Phase 3 question): option 2, whitening; flagged factors and wedge-following classes
