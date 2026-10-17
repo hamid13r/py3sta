@@ -95,6 +95,43 @@ exactly (ARI 1.0) and go through select → final.
 - gmm BIC decreases monotonically up to K = 8 (no minimum): continuous variability, BIC not a K selector here.
 - Timing of classify (6081 × 8): kmeans 2.7 s (GPU, 5 K + 10 bootstraps each), ward 24 s, gmm 24 s.
 
+## novaCTF vs Warp tomograms, full cycle (2026-10-17, RTX A5000)
+
+Question (user): are the novaCTF tomograms (`testing_different_recons/xml_tomos/nova_recon_dw`, made from the
+Warp XML alignments, dose-weighted) good, and is anything gained? Setup: two projects in `data/novactf_test/`
+(warp, nova) from the same STAR — `data/mim019_cycle` cycle-1 input poses with the exclusions cleared (6081
+particles), nova with `rlnMicrographName` → `<tomo>.mrc.mrc`; same geometry (1024×1440×500, 6.65 Å, origin 0);
+identical cycle.yaml (align bin 2, msa wmd, whitened classify runs, select `use: km_clean/K003`, target each);
+full cycle 0 → `next` → cycle-1 average. nova needed its own stack (1010 s for 6081 crops); total ~27 min per arm.
+
+- CTF: `py3sta ctf-check` (300 particles, reference = Warp average, zeros at 34 / 24 Å): Warp +0.51 / flipped
+  −0.38, novaCTF +0.45 / −0.37 → both already phase-flipped, `ctf: none` is right (as found before on one
+  tomogram). No CTF setting change needed.
+- The two reconstructions weight frequencies very differently: relative to the lowest shells the novaCTF
+  average has 2.6× Warp's amplitude at 80 Å and 4–7× at 15–50 Å. Real-space CCs (per-tomogram CC/SNR,
+  alignment CC, CC with the template) therefore cannot compare the two: they mostly measure this weighting
+  (template CC 0.84 Warp vs 0.49 nova). FSC is invariant to it.
+- No global offset: nova average onto Warp average = net rotation ~0°, shift < 1 Å, FSC between them 0.99 to
+  44 Å, 0.53 at 21 Å.
+
+| | half-map FSC 0.143 | FSC vs template at 30 / 25 / 22 / 19 Å | template FSC 0.5 |
+|---|---|---|---|
+| Warp, input poses (refined on Warp data) | 16.8 Å | 0.95 / 0.88 / 0.74 / 0.65 | 16.5 Å |
+| Warp, after cycle (align: median change 0.00°, 0.5 Å — converged) | 16.9 Å | 0.95 / 0.88 / 0.74 / 0.64 | 16.6 Å |
+| novaCTF, input poses | 21.1 Å | 0.93 / 0.88 / 0.68 / 0.61 | 17.7 Å |
+| novaCTF, after cycle (align: median change 1.42°, 3.8 Å) | 18.2 Å | 0.94 / **0.91 / 0.76 / 0.72** | 16.5 Å |
+
+- With the Warp-refined poses novaCTF looks worse (21.1 Å); one alignment round on the novaCTF tomograms moves
+  the particles (1.4°, 3.8 Å median — the poses were refined on Warp's reconstruction, which has corrections a
+  reconstruction from the XML alignment does not) and recovers most of it. After it, the agreement with the
+  template is equal (30 Å) or better (25–19 Å) than Warp's; the half-map FSC is still 1.3 Å worse (18.2 vs
+  16.9 Å). Half-map FSC measures self-consistency (noise), template FSC measures signal: novaCTF carries more
+  high-frequency signal but also more noise, and its poses are not converged yet.
+- Classes: same picture as Warp (K003 stable, wedge r ≤ 0.03 whitened, best class 17.7 vs 16.7 Å); select each:
+  classes in register (≤ 0.2° net, ≤ 0.3 Å). Same three low-CC tomograms in both after the cycle.
+- Not concluded yet: whether novaCTF passes Warp after more alignment rounds (the next cycle's align on nova
+  will show whether the poses keep moving and the half-map FSC keeps improving).
+
 ## Wedge whitening of the factor scores (2026-10-16)
 
 User decision (the parked Phase 3 question): option 2, whitening; flagged factors and wedge-following classes
