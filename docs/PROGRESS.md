@@ -28,8 +28,13 @@ wedge diagnostics, PNGs), `05_classify` (kmeans / ward / gmm, list of K, stabili
 on-demand `py3sta variance`.
 
 **Phase 4 — embedding + lasso selection** ✅ (2026-10-16, see below): `06_embed`, `py3sta explore` (offline HTML,
-lasso groups), groups as a classify run. Next: Phase 5 (select: targets `each`, class-average alignment among
-classes, full MIM019 cycle). Parked by the user: automatic exclusion / whitening of wedge factors.
+lasso groups), groups as a classify run. Parked by the user: automatic exclusion / whitening of wedge factors.
+
+**Phase 5 — select + full cycle** (2026-10-16, see below): `select.target: each` (anchor = best-SNR class or
+`select.anchor`) ✅; full MIM019 cycle 0 → 1 run end to end ✅. Acceptance mixed: with all classes aligned
+cycle 1 is 0.5 Å worse (16.8 vs 16.3 Å) — the loss is 03_align from RELION's poses (same as Phase 2 part 3),
+select is ~identity; excluding the 35 Å class keeps 16.3 Å with 60 % of the particles. Next: decide how to
+handle alignment from already-refined poses (see "Open").
 
 **Phase 2 — particle alignment (MRA)**, in three parts:
 1. ✅ Scoring engine `mra.py` (numpy reference + torch batches, cone/spin levels, constrained CC) (2026-10-15).
@@ -85,6 +90,49 @@ exactly (ARI 1.0) and go through select → final.
   and warns when `classify.factors` include factors msa flagged.
 - gmm BIC decreases monotonically up to K = 8 (no minimum): continuous variability, BIC not a K selector here.
 - Timing of classify (6081 × 8): kmeans 2.7 s (GPU, 5 K + 10 bootstraps each), ward 24 s, gmm 24 s.
+
+## Phase 5 — `select.target: each`, full MIM019 cycle (2026-10-16, RTX A5000)
+
+**`target: each`** (user decision: anchor = best-SNR class, not a running average). The anchor is the align
+class with the best class resolution (`py3staClassRes`, half-map FSC 0.143 from classify), ties → the larger
+class; class 0 (HDBSCAN noise / not in a lasso group) only if it is the only align class. `select.anchor: N`
+overrides (validated: needs `target: each`, must be an align class). The anchor's members keep their poses;
+the other align classes are aligned to the anchor's average (same `align_maps` search, reference mask).
+`transforms.star` has `py3staClassAnchor`; the manifest info has `anchor`.
+Tests: the chiral 2-class project with class 2 perturbed by a known (R, t): with the automatic anchor and with
+`anchor: 2` all particles end up within 1° of one common transform of the true poses, the anchor members'
+poses are unchanged; `pick_anchor` (noise skipped, excluded classes skipped, ties, no resolution → largest);
+validation; `anchor` change → select stale. 155 tests.
+
+**Full cycle on MIM019** (`data/mim019_cycle`, 6081 particles, shared stack). Cycle 0: average (7 s) →
+global reference (sphere 191.5 Å) → align on (default levels `[[12,4,12,4],[3,1,3,1],[1,.5,1,.5]]`, bin 2,
+low-pass 30 Å; 342 s; median change 2.06°, 3.3 Å; 614 particles at the search edge) → msa wmd (25 s; factors
+2–6 follow the wedge, as before) → classify `km_clean` (kmeans, factors 1/7/8) + `umap_km`, K 2–4 (68 s; all
+wedge r ≤ 0.08, stable: Jaccard ≥ 0.91) → select `use: km_clean/K003`, `target: each` (39 s) → final → `next`
+→ cycle 1 average.
+
+K003 classes: 1 = 2390 particles, 35.2 Å (holds the three low-CC tomograms); 2 = 2211, 16.6 Å (anchor);
+3 = 1480, 22.3 Å. Class transforms onto the anchor: class 1 rot/tilt/psi 51.8/0/−51.8 (= 0° net), class 3
+0.1°, shifts 0.0–0.1 Å, CC 0.95–0.96 → the classes were already in register (every particle was aligned to
+the same reference in 03_align), so `each` changes nothing here, as expected for one-reference cycles.
+After alignment the K=2 split is 3556/2525 (not the 5777/304 quality split of the unaligned msa check).
+
+| | particles | FSC 0.143 (first crossing) | CC vs `template.mrc` |
+|---|---|---|---|
+| cycle 0 average (RELION input poses) | 6002 | 16.3 Å | 0.845 |
+| run A: cycle 1, all classes aligned | 6001 | 16.8 Å | 0.840 |
+| run B: cycle 1, class 1 excluded | 3658 | 16.3 Å | 0.818 |
+
+(CC: `py3sta align-maps AVERAGE template.mrc`, sphere 191.5 Å soft 47.9 Å, no contrast flip — the averages
+are already protein-white like the template.) Acceptance "next cycle ≥ previous": run A misses by 0.5 Å, the
+same loss Phase 2 part 3 measured for aligning from RELION's poses (16.3 → 16.9 Å in the control run), so it
+comes from 03_align, not select. Run B keeps the resolution with 40 % fewer particles (the excluded class is
+the low-quality one: no low-CC tomograms remain); its lower CC vs the template is expected from the smaller
+average (more noise) and is not a resolution loss.
+
+Open: how to make cycle 1 ≥ cycle 0 when the input poses are already refined — e.g. finer last level / no
+first-level jump, align only to the best class, or a per-particle "keep the old pose unless the CC improves"
+rule (`align.min_gain` exists, default 0).
 
 ## Phase 4 — `06_embed` + `py3sta explore` (lasso groups) (2026-10-16)
 

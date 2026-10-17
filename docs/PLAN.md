@@ -243,5 +243,5 @@ tunnel (`ssh -L 8050:localhost:8050 workstation`).
 
 ## 6. Open questions (ask the user)
 
-- Reference for class-average alignment when `each`: best-SNR class vs running average (default: running average).
+- ~~Reference for class-average alignment when `each`~~ — decided 2026-10-16: best-SNR class (`select.anchor` overrides).
 - Dashboard framework: Dash (default) vs FastAPI + custom JS; multi-user needs on shared workstations?
